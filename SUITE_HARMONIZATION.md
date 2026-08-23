@@ -299,7 +299,7 @@ This sequence is authoritative unless a new safety or correctness finding requir
 4. **Freeze the `core/identity` contract. — CLOSED / FROZEN**
    Production identity evidence, anonymous-Color reference evidence, positive discrimination fixtures, and the twelve-case adversarial refusal gate are complete. The frozen contract is `docs/NORMALFIX_OBJECT_IDENTITY_CONTRACT_v0_2.md`.
 
-5. **Create `localis-indesign-tools`. — IN PROGRESS**
+5. **Create `localis-indesign-tools`. — CLOSED / PASS**
    GPL-3.0-or-later from the first commit. Move the authoritative harmonization specification here, establish shared-core directories and registries, and relocate proven `core/mutate` work.
 
    **Permanent source-authority rule:** after #5, no new shared module is developed as a copied implementation inside a tool repository. Tool repositories consume shared source; they do not fork it. This rule is repeated in `CONTRIBUTING.md`.
