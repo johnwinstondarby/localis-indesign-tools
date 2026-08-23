@@ -15,6 +15,10 @@
  *   NormalFix_AnonymousColorReference_Canary_v0_1_1.jsx
  *   SHA-256: ddb0f001ac3e183f5cf4120712a848275ca77557d17d3c5fa5cb693de568c71e
  *
+ * v0.3 safety-amendment evidence:
+ *   CoreIdentity_KinsokuMojikumi_SurfaceProbe_v1.jsx
+ *   SHA-256: dbe6982b332cb86a2db528f7c6ea196db0dbf878404edfa94707391b48c4c352
+ *
  * Promotion rule:
  *   This file is the shared source authority for core/identity. Tool
  *   repositories consume this source; they do not maintain independent copies.
@@ -22,7 +26,7 @@
 
 /*
 core/identity implementation candidate
-Contract version: 0.2.0
+Contract version: 0.3.0
 ExtendScript / ECMAScript 3 compatible.
 
 The implementation preserves two identity classes:
@@ -36,8 +40,8 @@ objects are never stored in serialized identity records.
 */
 
 var CoreIdentity = (function () {
-    var VERSION = "0.2.0-dev1";
-    var CONTRACT_VERSION = "0.2.0";
+    var VERSION = "0.3.0-dev1";
+    var CONTRACT_VERSION = "0.3.0";
 
     var FAMILY_LANGUAGE = "Language";
     var FAMILY_CHARACTER_STYLE = "CharacterStyle";
@@ -46,6 +50,8 @@ var CoreIdentity = (function () {
     var FAMILY_FONT = "Font";
     var FAMILY_STROKE_STYLE = "StrokeStyle";
     var FAMILY_NUMBERING_LIST = "NumberingList";
+    var FAMILY_KINSOKU_TABLE = "KinsokuTable";
+    var FAMILY_MOJIKUMI_TABLE = "MojikumiTable";
     var FAMILY_ANONYMOUS_COLOR = "AnonymousColorReference";
     var FAMILY_UNSUPPORTED = "Unsupported";
 
@@ -228,6 +234,8 @@ var CoreIdentity = (function () {
         if (t.indexOf("Font") >= 0) { return FAMILY_FONT; }
         if (t.indexOf("StrokeStyle") >= 0) { return FAMILY_STROKE_STYLE; }
         if (t.indexOf("NumberingList") >= 0) { return FAMILY_NUMBERING_LIST; }
+        if (t === "KinsokuTable") { return FAMILY_KINSOKU_TABLE; }
+        if (t === "MojikumiTable") { return FAMILY_MOJIKUMI_TABLE; }
 
         if ((t === "Color" ||
              t.indexOf("Swatch") >= 0 ||
@@ -455,6 +463,18 @@ var CoreIdentity = (function () {
         if (state.family === FAMILY_NUMBERING_LIST) {
             try { source = docRef.numberingLists; }
             catch (eList) { source = null; }
+            return collectionItems(source);
+        }
+
+        if (state.family === FAMILY_KINSOKU_TABLE) {
+            try { source = docRef.kinsokuTables; }
+            catch (eKinsoku) { source = null; }
+            return collectionItems(source);
+        }
+
+        if (state.family === FAMILY_MOJIKUMI_TABLE) {
+            try { source = docRef.mojikumiTables; }
+            catch (eMojikumi) { source = null; }
             return collectionItems(source);
         }
 
@@ -864,6 +884,8 @@ var CoreIdentity = (function () {
         FAMILY_FONT: FAMILY_FONT,
         FAMILY_STROKE_STYLE: FAMILY_STROKE_STYLE,
         FAMILY_NUMBERING_LIST: FAMILY_NUMBERING_LIST,
+        FAMILY_KINSOKU_TABLE: FAMILY_KINSOKU_TABLE,
+        FAMILY_MOJIKUMI_TABLE: FAMILY_MOJIKUMI_TABLE,
         FAMILY_ANONYMOUS_COLOR: FAMILY_ANONYMOUS_COLOR,
 
         STATUS_SERIALIZED: STATUS_SERIALIZED,
