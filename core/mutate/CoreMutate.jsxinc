@@ -1,0 +1,1019 @@
+/*
+ * Localis InDesign Tools - core/mutate
+ * Copyright (C) 2026 John Darby
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Provenance:
+ *   Promoted from CoreMutate_RealDOM_Canary_v6.jsx.
+ *   Combined proven-artifact SHA-256: f72ba161f9eb52396cdf3e552a312a5c961a54e159d7024c1068f4d8d668e48c
+ *   Extracted core-logic SHA-256:     2c46451de61b8104d228f6b67c22181ec0e991dfc69d2a927a910c3ddd998ff0
+ *
+ * Promotion rule:
+ *   This file is the shared source authority for core/mutate after suite
+ *   repository adoption. Tool repositories consume this source; they do not
+ *   maintain independent copies.
+ */
+
+/*
+core/mutate v1 implementation draft
+Frozen contract baseline: 2026-08-19
+ExtendScript / ECMAScript 3 compatible.
+
+Source is runtime-neutral except for createInDesignHost() and
+createFileJournalWriter(). Synthetic tests inject host and journal services.
+*/
+
+var CoreMutate = (function () {
+    var VERSION = "1.0.0-dev3";
+    var MODE_LIVE = "LIVE";
+    var MODE_DRY_RUN = "DRY_RUN";
+
+    var STATE_COMMITTED = "COMMITTED";
+    var STATE_SKIPPED = "SKIPPED";
+    var STATE_REFUSED = "REFUSED";
+    var STATE_ROLLED_BACK = "ROLLED_BACK";
+    var STATE_HARD_STOP = "HARD_STOP";
+    var STATE_NOT_ATTEMPTED = "NOT_ATTEMPTED";
+
+    var BATCH_COMPLETE = "COMPLETE";
+    var BATCH_HALTED = "HALTED";
+
+    var PLAN_READY = "PLAN_READY";
+    var PLAN_SKIPPED = "PLAN_SKIPPED";
+    var PLAN_REFUSED = "PLAN_REFUSED";
+    var PLAN_HALTED = "PLAN_HALTED";
+
+    var NOT_APPLICABLE = {__coreMutateSentinel: "NOT_APPLICABLE"};
+
+    function appendErrorText(item, stage, message) {
+        var part = String(stage || "ERROR") + ": " + String(message || "");
+        if (item.errorText && item.errorText.length > 0) {
+            item.errorText += " | " + part;
+        } else {
+            item.errorText = part;
+        }
+    }
+
+    function nowISO(host) {
+        if (host && typeof host.now === "function") {
+            return String(host.now());
+        }
+        try {
+            return (new Date()).toISOString();
+        } catch (eISO) {
+            return String(new Date());
+        }
+    }
+
+    function copyArray(value) {
+        var out = [];
+        var i;
+        if (!value || value.length === undefined) {
+            return out;
+        }
+        for (i = 0; i < value.length; i++) {
+            out.push(value[i]);
+        }
+        return out;
+    }
+
+    function signNumber(value) {
+        var n = Number(value);
+        if (isNaN(n) || !isFinite(n)) {
+            throw new Error("Comparator returned a non-finite value.");
+        }
+        if (n < 0) { return -1; }
+        if (n > 0) { return 1; }
+        return 0;
+    }
+
+    function isArray(value) {
+        return Object.prototype.toString.call(value) === "[object Array]";
+    }
+
+    function ownKeys(obj) {
+        var keys = [];
+        var key;
+        if (obj === null || obj === undefined || typeof obj !== "object") {
+            return keys;
+        }
+        for (key in obj) {
+            if (!obj.hasOwnProperty || obj.hasOwnProperty(key)) {
+                keys.push(String(key));
+            }
+        }
+        keys.sort();
+        return keys;
+    }
+
+    function escapeString(value) {
+        return String(value)
+            .replace(/\\/g, "\\\\")
+            .replace(/\t/g, "\\t")
+            .replace(/\r/g, "\\r")
+            .replace(/\n/g, "\\n")
+            .replace(/\"/g, "\\\"");
+    }
+
+    function canonicalSerialize(value, stack) {
+        var type = typeof value;
+        var keys, parts, i;
+
+        if (value === NOT_APPLICABLE ||
+            (value && typeof value === "object" && value.__coreMutateSentinel === "NOT_APPLICABLE")) {
+            return "<NOT_APPLICABLE>";
+        }
+        if (value === null) { return "null"; }
+        if (type === "string") { return "\"" + escapeString(value) + "\""; }
+        if (type === "number") {
+            if (!isFinite(value)) { throw new Error("Non-finite number is not serializable."); }
+            return String(value);
+        }
+        if (type === "boolean") { return value ? "true" : "false"; }
+        if (type === "undefined") { return "<UNDEFINED>"; }
+        if (type === "function") { throw new Error("Functions are not serializable."); }
+
+        if (!stack) { stack = []; }
+        for (i = 0; i < stack.length; i++) {
+            if (stack[i] === value) {
+                throw new Error("Circular value is not serializable.");
+            }
+        }
+        stack.push(value);
+
+        if (isArray(value)) {
+            parts = [];
+            for (i = 0; i < value.length; i++) {
+                parts.push(canonicalSerialize(value[i], stack));
+            }
+            stack.pop();
+            return "[" + parts.join(",") + "]";
+        }
+
+        keys = ownKeys(value);
+        parts = [];
+        for (i = 0; i < keys.length; i++) {
+            parts.push("\"" + escapeString(keys[i]) + "\":" + canonicalSerialize(value[keys[i]], stack));
+        }
+        stack.pop();
+        return "{" + parts.join(",") + "}";
+    }
+
+    function normalizeCoverage(coverage) {
+        var out = [];
+        var seen = {};
+        var i, key;
+        if (!isArray(coverage)) {
+            throw new Error("digestCoverage() must return an array of key names.");
+        }
+        for (i = 0; i < coverage.length; i++) {
+            key = String(coverage[i]);
+            if (key.length === 0) {
+                throw new Error("digestCoverage() contains an empty key.");
+            }
+            if (seen[key]) {
+                throw new Error("digestCoverage() contains duplicate key: " + key);
+            }
+            seen[key] = true;
+            out.push(key);
+        }
+        out.sort();
+        return out;
+    }
+
+    function validateDigestKeys(coverage, digest) {
+        var expected = normalizeCoverage(coverage);
+        var actual;
+        var i;
+        if (digest === null || digest === undefined || typeof digest !== "object" || isArray(digest)) {
+            return {ok: false, reason: "rollbackDigest() did not return a keyed object."};
+        }
+        actual = ownKeys(digest);
+        if (expected.length !== actual.length) {
+            return {ok: false, reason: "Digest key count does not match digestCoverage()."};
+        }
+        for (i = 0; i < expected.length; i++) {
+            if (expected[i] !== actual[i]) {
+                return {ok: false, reason: "Digest keys do not exactly match digestCoverage()."};
+            }
+        }
+        return {ok: true, keys: expected};
+    }
+
+    function digestSignature(coverage, digest) {
+        var validation = validateDigestKeys(coverage, digest);
+        var normalized = {};
+        var i, key;
+        if (!validation.ok) {
+            return {ok: false, reason: validation.reason};
+        }
+        try {
+            for (i = 0; i < validation.keys.length; i++) {
+                key = validation.keys[i];
+                normalized[key] = digest[key];
+            }
+            return {
+                ok: true,
+                keys: validation.keys,
+                signature: canonicalSerialize(normalized)
+            };
+        } catch (eSerialize) {
+            return {ok: false, reason: "Digest serialization failed: " + eSerialize.message, serializationError: true};
+        }
+    }
+
+    function locatorString(locator) {
+        return canonicalSerialize(locator);
+    }
+
+    function compareSerializedArrays(a, b) {
+        var i;
+        if (a.length !== b.length) { return false; }
+        for (i = 0; i < a.length; i++) {
+            if (locatorString(a[i]) !== locatorString(b[i])) { return false; }
+        }
+        return true;
+    }
+
+    function sortWithGuard(targets, comparator) {
+        var work = copyArray(targets);
+        work.sort(function (a, b) {
+            return signNumber(comparator(a, b));
+        });
+        return work;
+    }
+
+    function validateComparator(targets, comparator) {
+        var first, second;
+        var i, j, a, b, selfValue, forward1, forward2, reverse1, reverse2;
+        if (typeof comparator !== "function") {
+            return {ok: false, reason: "compareLocators() is required."};
+        }
+        try {
+            for (i = 0; i < targets.length; i++) {
+                a = targets[i];
+                selfValue = signNumber(comparator(a, a));
+                if (selfValue !== 0) {
+                    return {ok: false, reason: "Comparator must return 0 for a locator compared with itself."};
+                }
+            }
+
+            /*
+            Determinism is checked pairwise before sorting. Repeated sorting alone
+            can miss a stateful comparator whose call pattern happens to repeat.
+            */
+            for (i = 0; i < targets.length; i++) {
+                for (j = i + 1; j < targets.length; j++) {
+                    a = targets[i];
+                    b = targets[j];
+                    forward1 = signNumber(comparator(a, b));
+                    forward2 = signNumber(comparator(a, b));
+                    reverse1 = signNumber(comparator(b, a));
+                    reverse2 = signNumber(comparator(b, a));
+                    if (forward1 !== forward2 || reverse1 !== reverse2) {
+                        return {ok: false, reason: "Comparator returned inconsistent results for the same locator pair."};
+                    }
+                    if (forward1 !== -reverse1) {
+                        return {ok: false, reason: "Comparator failed antisymmetry validation."};
+                    }
+                }
+            }
+
+            first = sortWithGuard(targets, comparator);
+            second = sortWithGuard(targets, comparator);
+            if (!compareSerializedArrays(first, second)) {
+                return {ok: false, reason: "Comparator produced inconsistent ordering across repeated sorts."};
+            }
+            return {ok: true, ordered: first};
+        } catch (eComparator) {
+            return {ok: false, reason: "Comparator error: " + eComparator.message};
+        }
+    }
+
+    function normalizePrecheck(value) {
+        if (value === true) { return {eligible: true, reason: ""}; }
+        if (value === false || value === null || value === undefined) {
+            return {eligible: false, reason: ""};
+        }
+        if (typeof value === "object" && value.eligible !== undefined) {
+            return {eligible: value.eligible === true, reason: value.reason ? String(value.reason) : ""};
+        }
+        return {eligible: value === true, reason: ""};
+    }
+
+    function normalizeVerify(value) {
+        if (value === true) { return {ok: true, reason: ""}; }
+        if (value === false || value === null || value === undefined) {
+            return {ok: false, reason: ""};
+        }
+        if (typeof value === "object" && value.ok !== undefined) {
+            return {ok: value.ok === true, reason: value.reason ? String(value.reason) : ""};
+        }
+        return {ok: value === true, reason: ""};
+    }
+
+    function makeItem(locator, ordinal, mode, host) {
+        return {
+            processingOrdinal: ordinal,
+            targetLocator: locator,
+            locatorText: safeLocatorString(locator),
+            executionMode: mode,
+            resolveResult: null,
+            precheckResult: null,
+            snapshotCaptured: false,
+            rollbackReady: null,
+            rollbackReadinessReason: "",
+            digestCoverage: null,
+            preMutationDigestCaptured: false,
+            mutationAttempted: false,
+            mutationResult: null,
+            verificationResult: null,
+            rollbackAttempted: false,
+            rollbackResult: null,
+            postRollbackDigestResult: null,
+            reasonCode: "",
+            failureStage: "",
+            finalState: null,
+            planState: null,
+            errorText: "",
+            startedAt: nowISO(host),
+            completedAt: null
+        };
+    }
+
+    function safeLocatorString(locator) {
+        try { return locatorString(locator); } catch (e) { return "<UNSERIALIZABLE_LOCATOR>"; }
+    }
+
+    function markNotAttempted(items, orderedTargets, startIndex, mode, host) {
+        var i, item;
+        for (i = startIndex; i < orderedTargets.length; i++) {
+            item = makeItem(orderedTargets[i], i + 1, mode, host);
+            if (mode === MODE_DRY_RUN) {
+                item.planState = PLAN_HALTED;
+            } else {
+                item.finalState = STATE_NOT_ATTEMPTED;
+            }
+            item.reasonCode = "BATCH_HALTED";
+            item.completedAt = nowISO(host);
+            items.push(item);
+        }
+    }
+
+    function countsFor(items) {
+        var counts = {
+            committed: 0,
+            skipped: 0,
+            refused: 0,
+            rolledBack: 0,
+            hardStops: 0,
+            notAttempted: 0,
+            planReady: 0,
+            planSkipped: 0,
+            planRefused: 0,
+            planHalted: 0
+        };
+        var i, item;
+        for (i = 0; i < items.length; i++) {
+            item = items[i];
+            if (item.finalState === STATE_COMMITTED) { counts.committed++; }
+            else if (item.finalState === STATE_SKIPPED) { counts.skipped++; }
+            else if (item.finalState === STATE_REFUSED) { counts.refused++; }
+            else if (item.finalState === STATE_ROLLED_BACK) { counts.rolledBack++; }
+            else if (item.finalState === STATE_HARD_STOP) { counts.hardStops++; }
+            else if (item.finalState === STATE_NOT_ATTEMPTED) { counts.notAttempted++; }
+
+            if (item.planState === PLAN_READY) { counts.planReady++; }
+            else if (item.planState === PLAN_SKIPPED) { counts.planSkipped++; }
+            else if (item.planState === PLAN_REFUSED) { counts.planRefused++; }
+            else if (item.planState === PLAN_HALTED) { counts.planHalted++; }
+        }
+        return counts;
+    }
+
+    function makeBatch(label, targets, adapter, mode, host) {
+        return {
+            coreVersion: VERSION,
+            batchId: String((new Date()).getTime()) + "-" + String(Math.floor(Math.random() * 1000000)),
+            batchLabel: String(label || "core/mutate transaction"),
+            executionMode: mode,
+            undoLabel: mode === MODE_LIVE ? String(label || "core/mutate transaction") : "",
+            adapterId: adapter && adapter.adapterId ? String(adapter.adapterId) : "",
+            adapterVersion: adapter && adapter.adapterVersion ? String(adapter.adapterVersion) : "",
+            lastConformanceVersion: adapter && adapter.lastConformanceVersion ? String(adapter.lastConformanceVersion) : "",
+            lastConformanceDate: adapter && adapter.lastConformanceDate ? String(adapter.lastConformanceDate) : "",
+            targetsRequested: targets.length,
+            startedAt: nowISO(host),
+            completedAt: null,
+            batchState: null,
+            planningState: null,
+            batchReason: "",
+            journalDurable: true,
+            undoIntegrityUnknown: false,
+            items: [],
+            counts: null
+        };
+    }
+
+    function journalRecord(writer, kind, record) {
+        writer.write(kind, record);
+    }
+
+    function openWriter(options, batch) {
+        if (options && typeof options.journalWriterFactory === "function") {
+            return options.journalWriterFactory(batch);
+        }
+        if (options && options.journalPath) {
+            return createFileJournalWriter(options.journalPath);
+        }
+        throw new Error("No durable journal writer or journal path was supplied.");
+    }
+
+    function closeWriter(writer) {
+        if (writer && typeof writer.close === "function") {
+            writer.close();
+        }
+    }
+
+    function writeItemOrFlag(batch, writer, item) {
+        if (!writer || !batch.journalDurable) { return false; }
+        try {
+            journalRecord(writer, "ITEM", item);
+            return true;
+        } catch (eWrite) {
+            batch.journalDurable = false;
+            batch.journalError = eWrite.message;
+            return false;
+        }
+    }
+
+    function writeBatchOrFlag(batch, writer) {
+        if (!writer || !batch.journalDurable) { return false; }
+        try {
+            journalRecord(writer, "BATCH", batchSummaryForJournal(batch));
+            return true;
+        } catch (eWrite) {
+            batch.journalDurable = false;
+            batch.journalError = eWrite.message;
+            return false;
+        }
+    }
+
+    function batchSummaryForJournal(batch) {
+        return {
+            coreVersion: batch.coreVersion,
+            batchId: batch.batchId,
+            batchLabel: batch.batchLabel,
+            executionMode: batch.executionMode,
+            undoLabel: batch.undoLabel,
+            adapterId: batch.adapterId,
+            adapterVersion: batch.adapterVersion,
+            lastConformanceVersion: batch.lastConformanceVersion,
+            lastConformanceDate: batch.lastConformanceDate,
+            targetsRequested: batch.targetsRequested,
+            startedAt: batch.startedAt,
+            completedAt: batch.completedAt,
+            batchState: batch.batchState,
+            planningState: batch.planningState,
+            batchReason: batch.batchReason,
+            journalDurable: batch.journalDurable,
+            counts: batch.counts
+        };
+    }
+
+    function finalizeBatch(batch, writer, host) {
+        batch.completedAt = nowISO(host);
+        batch.counts = countsFor(batch.items);
+        if (writer && batch.journalDurable) {
+            if (!writeBatchOrFlag(batch, writer)) {
+                if (batch.executionMode === MODE_LIVE) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                } else {
+                    batch.planningState = PLAN_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                }
+                batch.counts = countsFor(batch.items);
+            }
+        }
+        try {
+            closeWriter(writer);
+        } catch (eClose) {
+            batch.journalDurable = false;
+            batch.journalError = eClose.message;
+            if (batch.executionMode === MODE_LIVE) {
+                batch.batchState = BATCH_HALTED;
+                batch.batchReason = "JOURNAL_FAILURE";
+            } else {
+                batch.planningState = PLAN_HALTED;
+                batch.batchReason = "JOURNAL_FAILURE";
+            }
+        }
+        return batch;
+    }
+
+    function preflightHalt(batch, targets, mode, host, reason) {
+        batch.batchReason = reason;
+        if (mode === MODE_DRY_RUN) {
+            batch.planningState = PLAN_HALTED;
+        } else {
+            batch.batchState = BATCH_HALTED;
+        }
+        markNotAttempted(batch.items, targets, 0, mode, host);
+        batch.counts = countsFor(batch.items);
+        return batch;
+    }
+
+    function processBatch(batch, orderedTargets, adapter, options, host, writer) {
+        var i, locator, item, target, precheck, snapshot, coverage;
+        var preDigestRaw, preDigest, mutateError, verifyTarget, verifyResult;
+        var rollbackTarget, postTarget, postDigestRaw, postDigest;
+        var declaredCoverageSignature = null;
+        var currentCoverageSignature;
+        var journalFailedAfterProof = false;
+        var mode = batch.executionMode;
+
+        for (i = 0; i < orderedTargets.length; i++) {
+            locator = orderedTargets[i];
+            item = makeItem(locator, i + 1, mode, host);
+
+            try {
+                target = adapter.resolve(locator);
+                if (target === null || target === undefined) { throw new Error("Target did not resolve."); }
+                item.resolveResult = "RESOLVED";
+            } catch (eResolve) {
+                item.resolveResult = "FAILED";
+                item.reasonCode = "RESOLVE_FAILED";
+                item.failureStage = "RESOLVE";
+                item.errorText = eResolve.message;
+                if (mode === MODE_DRY_RUN) { item.planState = PLAN_SKIPPED; }
+                else { item.finalState = STATE_SKIPPED; }
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (!writeItemOrFlag(batch, writer, item) && mode === MODE_LIVE) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                continue;
+            }
+
+            try {
+                precheck = normalizePrecheck(adapter.precheck(target, locator));
+                item.precheckResult = precheck.eligible ? "ELIGIBLE" : "DECLINED";
+            } catch (ePrecheck) {
+                item.precheckResult = "ERROR";
+                item.reasonCode = "PRECHECK_ERROR";
+                item.failureStage = "PRECHECK";
+                item.errorText = ePrecheck.message;
+                if (mode === MODE_DRY_RUN) { item.planState = PLAN_SKIPPED; }
+                else { item.finalState = STATE_SKIPPED; }
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (!writeItemOrFlag(batch, writer, item) && mode === MODE_LIVE) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                continue;
+            }
+
+            if (!precheck.eligible) {
+                item.reasonCode = "PRECHECK_DECLINED";
+                item.errorText = precheck.reason;
+                if (mode === MODE_DRY_RUN) { item.planState = PLAN_SKIPPED; }
+                else { item.finalState = STATE_SKIPPED; }
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (!writeItemOrFlag(batch, writer, item) && mode === MODE_LIVE) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                continue;
+            }
+
+            try {
+                snapshot = adapter.snapshot(target, locator);
+                if (snapshot === null || snapshot === undefined || typeof snapshot !== "object") {
+                    throw new Error("snapshot() did not return an object.");
+                }
+                item.snapshotCaptured = true;
+                item.rollbackReady = snapshot.rollbackReady === true;
+                item.rollbackReadinessReason = snapshot.rollbackReason ? String(snapshot.rollbackReason) : "";
+            } catch (eSnapshot) {
+                item.reasonCode = "SNAPSHOT_ERROR";
+                item.failureStage = "SNAPSHOT";
+                item.errorText = eSnapshot.message;
+                if (mode === MODE_DRY_RUN) { item.planState = PLAN_SKIPPED; }
+                else { item.finalState = STATE_SKIPPED; }
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (!writeItemOrFlag(batch, writer, item) && mode === MODE_LIVE) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                continue;
+            }
+
+            if (!item.rollbackReady) {
+                item.reasonCode = "ROLLBACK_NOT_READY";
+                if (mode === MODE_DRY_RUN) { item.planState = PLAN_REFUSED; }
+                else { item.finalState = STATE_REFUSED; }
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (!writeItemOrFlag(batch, writer, item) && mode === MODE_LIVE) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                continue;
+            }
+
+            try {
+                coverage = normalizeCoverage(adapter.digestCoverage(target, locator));
+                currentCoverageSignature = canonicalSerialize(coverage);
+                if (declaredCoverageSignature === null) {
+                    declaredCoverageSignature = currentCoverageSignature;
+                } else if (currentCoverageSignature !== declaredCoverageSignature) {
+                    throw new Error("digestCoverage() changed within one adapter batch.");
+                }
+                item.digestCoverage = copyArray(coverage);
+            } catch (eCoverage) {
+                item.reasonCode = "ADAPTER_CONTRACT_MISMATCH";
+                item.failureStage = "DIGEST_COVERAGE";
+                item.errorText = eCoverage.message;
+                if (mode === MODE_DRY_RUN) { item.planState = PLAN_HALTED; }
+                else { item.finalState = STATE_NOT_ATTEMPTED; }
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (mode === MODE_DRY_RUN) {
+                    batch.planningState = PLAN_HALTED;
+                } else {
+                    batch.batchState = BATCH_HALTED;
+                }
+                batch.batchReason = "ADAPTER_CONTRACT_MISMATCH";
+                markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                return;
+            }
+
+            try {
+                preDigestRaw = adapter.rollbackDigest(target, locator);
+                preDigest = digestSignature(coverage, preDigestRaw);
+                if (!preDigest.ok) {
+                    if (preDigest.serializationError) {
+                        throw new Error(preDigest.reason);
+                    }
+                    item.reasonCode = "ADAPTER_CONTRACT_MISMATCH";
+                    item.failureStage = "DIGEST_KEYS";
+                    item.errorText = preDigest.reason;
+                    if (mode === MODE_DRY_RUN) { item.planState = PLAN_HALTED; }
+                    else { item.finalState = STATE_NOT_ATTEMPTED; }
+                    item.completedAt = nowISO(host);
+                    batch.items.push(item);
+                    if (mode === MODE_DRY_RUN) { batch.planningState = PLAN_HALTED; }
+                    else { batch.batchState = BATCH_HALTED; }
+                    batch.batchReason = "ADAPTER_CONTRACT_MISMATCH";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                item.preMutationDigestCaptured = true;
+            } catch (eDigest) {
+                item.reasonCode = "DIGEST_ERROR";
+                item.failureStage = "DIGEST";
+                item.errorText = eDigest.message;
+                if (mode === MODE_DRY_RUN) { item.planState = PLAN_SKIPPED; }
+                else { item.finalState = STATE_SKIPPED; }
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (!writeItemOrFlag(batch, writer, item) && mode === MODE_LIVE) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                continue;
+            }
+
+            if (mode === MODE_DRY_RUN) {
+                item.planState = PLAN_READY;
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                writeItemOrFlag(batch, writer, item);
+                continue;
+            }
+
+            item.mutationAttempted = true;
+            mutateError = null;
+            try {
+                adapter.mutate(target, snapshot, locator);
+                item.mutationResult = "RETURNED";
+            } catch (eMutate) {
+                mutateError = eMutate;
+                item.mutationResult = "ERROR";
+                item.reasonCode = "MUTATE_ERROR";
+                item.failureStage = "MUTATE";
+                appendErrorText(item, "MUTATE", eMutate.message);
+            }
+
+            verifyResult = null;
+            if (mutateError === null) {
+                try {
+                    verifyTarget = adapter.resolve(locator);
+                    if (verifyTarget === null || verifyTarget === undefined) {
+                        throw new Error("Target could not be re-acquired for verification.");
+                    }
+                    item.resolveResult = "REACQUIRED_FOR_VERIFY";
+                } catch (eVerifyResolve) {
+                    item.reasonCode = "RESOLVE_FAILED";
+                    item.failureStage = "VERIFY_RESOLVE";
+                    appendErrorText(item, "VERIFY_RESOLVE", eVerifyResolve.message);
+                    item.finalState = STATE_HARD_STOP;
+                    item.completedAt = nowISO(host);
+                    batch.items.push(item);
+                    writeItemOrFlag(batch, writer, item);
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "HARD_STOP";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+
+                try {
+                    verifyResult = normalizeVerify(adapter.verify(verifyTarget, snapshot, preDigestRaw, locator));
+                    item.verificationResult = verifyResult.ok ? "PASS" : "FAIL";
+                    if (!verifyResult.ok) {
+                        item.reasonCode = "VERIFY_FAILED";
+                        item.failureStage = "VERIFY";
+                        appendErrorText(item, "VERIFY", verifyResult.reason);
+                    }
+                } catch (eVerify) {
+                    verifyResult = {ok: false, reason: eVerify.message};
+                    item.verificationResult = "ERROR";
+                    item.reasonCode = "VERIFY_ERROR";
+                    item.failureStage = "VERIFY";
+                    appendErrorText(item, "VERIFY", eVerify.message);
+                }
+            }
+
+            if (mutateError === null && verifyResult && verifyResult.ok) {
+                item.finalState = STATE_COMMITTED;
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                if (!writeItemOrFlag(batch, writer, item)) {
+                    journalFailedAfterProof = true;
+                }
+                if (journalFailedAfterProof) {
+                    batch.batchState = BATCH_HALTED;
+                    batch.batchReason = "JOURNAL_FAILURE";
+                    markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                    return;
+                }
+                continue;
+            }
+
+            item.rollbackAttempted = true;
+            try {
+                rollbackTarget = adapter.resolve(locator);
+                if (rollbackTarget === null || rollbackTarget === undefined) {
+                    throw new Error("Target could not be re-acquired for rollback.");
+                }
+                adapter.rollback(rollbackTarget, snapshot, locator);
+                item.rollbackResult = "RETURNED";
+            } catch (eRollback) {
+                item.rollbackResult = "ERROR";
+                item.reasonCode = "ROLLBACK_ERROR";
+                item.failureStage = "ROLLBACK";
+                appendErrorText(item, "ROLLBACK", eRollback.message);
+                item.finalState = STATE_HARD_STOP;
+                item.completedAt = nowISO(host);
+                batch.items.push(item);
+                writeItemOrFlag(batch, writer, item);
+                batch.batchState = BATCH_HALTED;
+                batch.batchReason = "HARD_STOP";
+                markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                return;
+            }
+
+            try {
+                postTarget = adapter.resolve(locator);
+                if (postTarget === null || postTarget === undefined) {
+                    throw new Error("Target could not be re-acquired after rollback.");
+                }
+                postDigestRaw = adapter.rollbackDigest(postTarget, locator);
+                postDigest = digestSignature(coverage, postDigestRaw);
+                if (!postDigest.ok) {
+                    item.postRollbackDigestResult = "ERROR";
+                    item.reasonCode = postDigest.serializationError ? "ROLLBACK_DIGEST_ERROR" : "ROLLBACK_DIGEST_KEY_MISMATCH";
+                    item.failureStage = "ROLLBACK_DIGEST";
+                    appendErrorText(item, "ROLLBACK_DIGEST", postDigest.reason);
+                    item.finalState = STATE_HARD_STOP;
+                } else if (postDigest.signature !== preDigest.signature) {
+                    item.postRollbackDigestResult = "MISMATCH";
+                    item.reasonCode = "ROLLBACK_DIGEST_MISMATCH";
+                    item.failureStage = "ROLLBACK_DIGEST";
+                    item.finalState = STATE_HARD_STOP;
+                } else {
+                    item.postRollbackDigestResult = "MATCH";
+                    item.finalState = STATE_ROLLED_BACK;
+                }
+            } catch (ePostDigest) {
+                item.postRollbackDigestResult = "ERROR";
+                item.reasonCode = "ROLLBACK_DIGEST_ERROR";
+                item.failureStage = "ROLLBACK_DIGEST";
+                appendErrorText(item, "ROLLBACK_DIGEST", ePostDigest.message);
+                item.finalState = STATE_HARD_STOP;
+            }
+
+            item.completedAt = nowISO(host);
+            batch.items.push(item);
+            if (!writeItemOrFlag(batch, writer, item)) {
+                journalFailedAfterProof = true;
+            }
+
+            if (item.finalState === STATE_HARD_STOP) {
+                batch.batchState = BATCH_HALTED;
+                batch.batchReason = "HARD_STOP";
+                markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                return;
+            }
+
+            if (journalFailedAfterProof) {
+                batch.batchState = BATCH_HALTED;
+                batch.batchReason = "JOURNAL_FAILURE";
+                markNotAttempted(batch.items, orderedTargets, i + 1, mode, host);
+                return;
+            }
+        }
+
+        if (mode === MODE_DRY_RUN) {
+            batch.planningState = PLAN_READY;
+        } else {
+            batch.batchState = BATCH_COMPLETE;
+        }
+    }
+
+    function transaction(label, targets, adapter, options) {
+        var opts = options || {};
+        var mode = opts.mode === MODE_DRY_RUN ? MODE_DRY_RUN : MODE_LIVE;
+        var host = opts.host || createInDesignHost();
+        var inputTargets = copyArray(targets || []);
+        var batch = makeBatch(label, inputTargets, adapter || {}, mode, host);
+        var writer = null;
+        var comparatorCheck, orderedTargets;
+        var runError = null;
+
+        if (!adapter || typeof adapter.resolve !== "function" ||
+            typeof adapter.precheck !== "function" ||
+            typeof adapter.snapshot !== "function" ||
+            typeof adapter.digestCoverage !== "function" ||
+            typeof adapter.rollbackDigest !== "function" ||
+            typeof adapter.mutate !== "function" ||
+            typeof adapter.verify !== "function" ||
+            typeof adapter.rollback !== "function") {
+            return preflightHalt(batch, inputTargets, mode, host, "ADAPTER_CONTRACT_MISMATCH");
+        }
+
+        try {
+            writer = openWriter(opts, batch);
+            journalRecord(writer, "HEADER", {
+                format: "CORE_MUTATE_JOURNAL",
+                formatVersion: 1,
+                coreVersion: VERSION,
+                batchId: batch.batchId,
+                batchLabel: batch.batchLabel,
+                executionMode: batch.executionMode,
+                adapterId: batch.adapterId,
+                adapterVersion: batch.adapterVersion,
+                lastConformanceVersion: batch.lastConformanceVersion,
+                lastConformanceDate: batch.lastConformanceDate,
+                startedAt: batch.startedAt
+            });
+        } catch (eJournalOpen) {
+            batch.journalDurable = false;
+            batch.journalError = eJournalOpen.message;
+            preflightHalt(batch, inputTargets, mode, host, "JOURNAL_UNAVAILABLE");
+            batch.completedAt = nowISO(host);
+            return batch;
+        }
+
+        if (mode === MODE_LIVE &&
+            (String(adapter.adapterVersion || "").length === 0 ||
+             String(adapter.lastConformanceVersion || "").length === 0 ||
+             String(adapter.lastConformanceDate || "").length === 0 ||
+             String(adapter.adapterVersion || "") !== String(adapter.lastConformanceVersion || ""))) {
+            preflightHalt(batch, inputTargets, mode, host, "ADAPTER_CONFORMANCE_STALE");
+            return finalizeBatch(batch, writer, host);
+        }
+
+        comparatorCheck = validateComparator(inputTargets, adapter.compareLocators);
+        if (!comparatorCheck.ok) {
+            preflightHalt(batch, inputTargets, mode, host, "ADAPTER_CONTRACT_MISMATCH");
+            batch.preflightError = comparatorCheck.reason;
+            return finalizeBatch(batch, writer, host);
+        }
+        orderedTargets = comparatorCheck.ordered;
+
+        if (mode === MODE_DRY_RUN) {
+            processBatch(batch, orderedTargets, adapter, opts, host, writer);
+            if (batch.planningState === null) { batch.planningState = PLAN_READY; }
+            return finalizeBatch(batch, writer, host);
+        }
+
+        try {
+            host.runUndoGroup(batch.undoLabel, function () {
+                processBatch(batch, orderedTargets, adapter, opts, host, writer);
+                if (batch.batchState === null) { batch.batchState = BATCH_COMPLETE; }
+            });
+        } catch (eHost) {
+            runError = eHost;
+            batch.batchState = BATCH_HALTED;
+            batch.batchReason = "HOST_ERROR";
+            batch.undoIntegrityUnknown = true;
+            batch.hostError = eHost.message;
+        }
+
+        return finalizeBatch(batch, writer, host);
+    }
+
+    function createInDesignHost() {
+        return {
+            now: function () {
+                try { return (new Date()).toISOString(); } catch (e) { return String(new Date()); }
+            },
+            runUndoGroup: function (label, fn) {
+                var result;
+                app.doScript(function () {
+                    result = fn();
+                }, ScriptLanguage.JAVASCRIPT, undefined, UndoModes.ENTIRE_SCRIPT, label);
+                return result;
+            }
+        };
+    }
+
+    function createFileJournalWriter(path) {
+        var file;
+        if (typeof File === "undefined") {
+            throw new Error("ExtendScript File API is unavailable.");
+        }
+        file = new File(path);
+        if (!file.parent.exists && !file.parent.create()) {
+            throw new Error("Could not create journal directory: " + file.parent.fsName);
+        }
+        file.encoding = "UTF-8";
+        file.lineFeed = "Windows";
+        if (!file.open("w")) {
+            throw new Error("Could not open journal file: " + file.fsName);
+        }
+        return {
+            write: function (kind, record) {
+                file.writeln(String(kind) + "\t" + canonicalSerialize(record));
+                if (typeof file.flush === "function") { file.flush(); }
+            },
+            close: function () {
+                if (file.opened) { file.close(); }
+            },
+            path: file.fsName
+        };
+    }
+
+    return {
+        VERSION: VERSION,
+        MODE_LIVE: MODE_LIVE,
+        MODE_DRY_RUN: MODE_DRY_RUN,
+        NOT_APPLICABLE: NOT_APPLICABLE,
+        transaction: transaction,
+        createInDesignHost: createInDesignHost,
+        createFileJournalWriter: createFileJournalWriter,
+        canonicalSerialize: canonicalSerialize,
+        validateDigestKeys: validateDigestKeys,
+        states: {
+            COMMITTED: STATE_COMMITTED,
+            SKIPPED: STATE_SKIPPED,
+            REFUSED: STATE_REFUSED,
+            ROLLED_BACK: STATE_ROLLED_BACK,
+            HARD_STOP: STATE_HARD_STOP,
+            NOT_ATTEMPTED: STATE_NOT_ATTEMPTED
+        },
+        batchStates: {
+            COMPLETE: BATCH_COMPLETE,
+            HALTED: BATCH_HALTED
+        },
+        planStates: {
+            READY: PLAN_READY,
+            SKIPPED: PLAN_SKIPPED,
+            REFUSED: PLAN_REFUSED,
+            HALTED: PLAN_HALTED
+        }
+    };
+}());
+
+if (typeof module !== "undefined" && module.exports) {
+    module.exports = CoreMutate;
+}
