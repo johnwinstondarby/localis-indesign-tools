@@ -1,0 +1,888 @@
+/*
+ * Localis InDesign Tools - core/identity
+ * Copyright (C) 2026 John Darby
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Provenance:
+ *   Promoted from the frozen NormalFix object-identity contract and the two
+ *   passing reference canaries that established identified-object refusal and
+ *   anonymous Color reference behavior.
+ *
+ *   NormalFix_CoreIdentity_AdversarialRefusal_Canary_v0_1_3.jsx
+ *   SHA-256: b0f92c1754428d8d1d8ecf1bf7b391032f745bb7c2d1965d04b78a25f68f788b
+ *
+ *   NormalFix_AnonymousColorReference_Canary_v0_1_1.jsx
+ *   SHA-256: ddb0f001ac3e183f5cf4120712a848275ca77557d17d3c5fa5cb693de568c71e
+ *
+ * Promotion rule:
+ *   This file is the shared source authority for core/identity. Tool
+ *   repositories consume this source; they do not maintain independent copies.
+ */
+
+/*
+core/identity implementation candidate
+Contract version: 0.2.0
+ExtendScript / ECMAScript 3 compatible.
+
+The implementation preserves two identity classes:
+  1. identified objects, resolved by family-specific semantic identity with
+     supplemental ID evidence;
+  2. anonymous document-owned Color references, restored only through an exact
+     document-local reference tuple.
+
+Authoritative identity state contains plain data only. Live InDesign host
+objects are never stored in serialized identity records.
+*/
+
+var CoreIdentity = (function () {
+    var VERSION = "0.2.0-dev1";
+    var CONTRACT_VERSION = "0.2.0";
+
+    var FAMILY_LANGUAGE = "Language";
+    var FAMILY_CHARACTER_STYLE = "CharacterStyle";
+    var FAMILY_PARAGRAPH_STYLE = "ParagraphStyle";
+    var FAMILY_NAMED_SWATCH_COLOR = "NamedSwatchColor";
+    var FAMILY_FONT = "Font";
+    var FAMILY_STROKE_STYLE = "StrokeStyle";
+    var FAMILY_NUMBERING_LIST = "NumberingList";
+    var FAMILY_ANONYMOUS_COLOR = "AnonymousColorReference";
+    var FAMILY_UNSUPPORTED = "Unsupported";
+
+    var STATUS_SERIALIZED = "SERIALIZED";
+    var STATUS_RESOLVED = "RESOLVED";
+    var STATUS_INVALID_STATE = "INVALID_STATE";
+    var STATUS_CONTRACT_VERSION_MISMATCH = "CONTRACT_VERSION_MISMATCH";
+    var STATUS_UNSUPPORTED_TYPE = "UNSUPPORTED_TYPE";
+    var STATUS_INCOMPLETE_IDENTITY = "INCOMPLETE_IDENTITY";
+    var STATUS_UNRESOLVED_IDENTITY = "UNRESOLVED_IDENTITY";
+    var STATUS_AMBIGUOUS_IDENTITY = "AMBIGUOUS_IDENTITY";
+    var STATUS_IDENTITY_CONFLICT = "IDENTITY_CONFLICT";
+    var STATUS_SPECIFIER_IDENTITY_CONFLICT = "SPECIFIER_IDENTITY_CONFLICT";
+    var STATUS_RESOLVE_FAILED = "RESOLVE_FAILED";
+
+    function safeString(value) {
+        try { return String(value); }
+        catch (e) { return ""; }
+    }
+
+    function valid(obj) {
+        /*
+         * Avoid strict equality against host proxies. InDesign 21.5.1.73 can
+         * throw from host-object === for some Color proxy values.
+         */
+        try {
+            if (!obj) { return false; }
+        } catch (eTruthy) {
+            return false;
+        }
+        try {
+            if (obj.isValid === false) { return false; }
+        } catch (eValid) {}
+        return true;
+    }
+
+    function primitiveEqual(a, b) {
+        var ta = typeof a;
+        var tb = typeof b;
+        var allowed = ta === "string" || ta === "number" || ta === "boolean";
+
+        if (!allowed || tb !== ta) {
+            return false;
+        }
+        return a === b;
+    }
+
+    function typeName(obj) {
+        var out = "";
+        if (!valid(obj)) { return out; }
+        try {
+            if (obj.reflect && obj.reflect.name) {
+                out = String(obj.reflect.name);
+                if (out.length > 0) { return out; }
+            }
+        } catch (eReflect) {}
+        try {
+            if (typeof obj.constructorName !== "undefined") {
+                out = String(obj.constructorName);
+                if (out.length > 0) { return out; }
+            }
+        } catch (eConstructor) {}
+        return out;
+    }
+
+    function stringProp(obj, prop) {
+        var value;
+        try {
+            value = obj[prop];
+        } catch (eRead) {
+            return "";
+        }
+        if (typeof value === "undefined") { return ""; }
+        try { return String(value); }
+        catch (eString) { return ""; }
+    }
+
+    function objectId(obj) {
+        return stringProp(obj, "id");
+    }
+
+    function safeSpecifier(obj) {
+        try { return String(obj.toSpecifier()); }
+        catch (e) { return ""; }
+    }
+
+    function enumText(value) {
+        try { return String(value); }
+        catch (e) { return ""; }
+    }
+
+    function numberArray(value) {
+        var out = [];
+        var i;
+        if (!(value instanceof Array)) {
+            try {
+                for (i = 0; i < value.length; i++) {
+                    out.push(Number(value[i]));
+                }
+                return out;
+            } catch (eCollection) {
+                return null;
+            }
+        }
+        for (i = 0; i < value.length; i++) {
+            out.push(Number(value[i]));
+        }
+        return out;
+    }
+
+    function sameNumberArray(a, b) {
+        var i;
+        if (!(a instanceof Array) || !(b instanceof Array)) { return false; }
+        if (a.length !== b.length) { return false; }
+        for (i = 0; i < a.length; i++) {
+            if (!primitiveEqual(Number(a[i]), Number(b[i]))) { return false; }
+        }
+        return true;
+    }
+
+    function isGroupType(t) {
+        return t === "CharacterStyleGroup" ||
+               t === "ParagraphStyleGroup" ||
+               t === "ColorGroup" ||
+               t === "SwatchGroup";
+    }
+
+    function qualifiedPath(obj) {
+        var parts = [];
+        var ownName = stringProp(obj, "name");
+        var node = null;
+        var depth = 0;
+        var t, n;
+
+        if (ownName.length > 0) { parts.unshift(ownName); }
+
+        try { node = obj.parent; } catch (eParent) { node = null; }
+        while (valid(node) && depth < 32) {
+            t = typeName(node);
+            if (isGroupType(t)) {
+                n = stringProp(node, "name");
+                if (n.length > 0) { parts.unshift(n); }
+            }
+            if (t === "Document" || t === "Application") { break; }
+            try { node = node.parent; } catch (eNext) { break; }
+            depth++;
+        }
+
+        return parts.join("/");
+    }
+
+    function documentBinding(obj) {
+        var node = obj;
+        var depth = 0;
+        var t;
+
+        while (valid(node) && depth < 64) {
+            t = typeName(node);
+            if (t === "Document") {
+                return {
+                    id: objectId(node),
+                    name: stringProp(node, "name")
+                };
+            }
+            if (t === "Application") { break; }
+            try { node = node.parent; } catch (eParent) { break; }
+            depth++;
+        }
+
+        return {id:"", name:""};
+    }
+
+    function familyFor(obj) {
+        var t = typeName(obj);
+        var n = stringProp(obj, "name");
+
+        if (t.indexOf("Language") >= 0) { return FAMILY_LANGUAGE; }
+        if (t.indexOf("CharacterStyle") >= 0) { return FAMILY_CHARACTER_STYLE; }
+        if (t.indexOf("ParagraphStyle") >= 0) { return FAMILY_PARAGRAPH_STYLE; }
+        if (t.indexOf("Font") >= 0) { return FAMILY_FONT; }
+        if (t.indexOf("StrokeStyle") >= 0) { return FAMILY_STROKE_STYLE; }
+        if (t.indexOf("NumberingList") >= 0) { return FAMILY_NUMBERING_LIST; }
+
+        if ((t === "Color" ||
+             t.indexOf("Swatch") >= 0 ||
+             t.indexOf("Gradient") >= 0 ||
+             t.indexOf("Tint") >= 0 ||
+             t.indexOf("MixedInk") >= 0) &&
+            n.length > 0) {
+            return FAMILY_NAMED_SWATCH_COLOR;
+        }
+
+        if (t === "Color" && n.length === 0) {
+            return FAMILY_ANONYMOUS_COLOR;
+        }
+
+        return FAMILY_UNSUPPORTED;
+    }
+
+    function baseState(family, obj) {
+        return {
+            kind: "host_identity",
+            contractVersion: CONTRACT_VERSION,
+            family: family,
+            typeName: typeName(obj),
+            name: "",
+            path: "",
+            id: "",
+            postscriptName: "",
+            fullName: "",
+            specifier: "",
+            documentId: "",
+            documentName: "",
+            model: "",
+            space: "",
+            value: []
+        };
+    }
+
+    function serializeAnonymousColor(obj, docRef) {
+        var state = baseState(FAMILY_ANONYMOUS_COLOR, obj);
+        var binding = documentBinding(obj);
+        var expectedDocId = docRef && valid(docRef) ? objectId(docRef) : binding.id;
+        var rawValue;
+
+        state.name = stringProp(obj, "name");
+        state.id = objectId(obj);
+        state.specifier = safeSpecifier(obj);
+        state.documentId = binding.id;
+        state.documentName = binding.name;
+
+        try { state.model = enumText(obj.model); }
+        catch (eModel) { state.model = ""; }
+        try { state.space = enumText(obj.space); }
+        catch (eSpace) { state.space = ""; }
+        try {
+            rawValue = obj.colorValue;
+            state.value = numberArray(rawValue);
+        } catch (eValue) {
+            state.value = null;
+        }
+
+        if (state.name.length !== 0 ||
+            state.id.length === 0 ||
+            state.specifier.length === 0 ||
+            state.documentId.length === 0 ||
+            state.model.length === 0 ||
+            state.space.length === 0 ||
+            !(state.value instanceof Array) ||
+            state.value.length === 0) {
+            return {ok:false, status:STATUS_INCOMPLETE_IDENTITY, state:state};
+        }
+
+        if (expectedDocId.length > 0 &&
+            !primitiveEqual(state.documentId, expectedDocId)) {
+            return {
+                ok:false,
+                status:STATUS_IDENTITY_CONFLICT,
+                state:state,
+                detail:"anonymous Color is not owned by the bound document"
+            };
+        }
+
+        return {ok:true, status:STATUS_SERIALIZED, state:state};
+    }
+
+    function serializeIdentified(obj) {
+        var family = familyFor(obj);
+        var state = baseState(family, obj);
+
+        if (family === FAMILY_UNSUPPORTED) {
+            return {ok:false, status:STATUS_UNSUPPORTED_TYPE, state:state};
+        }
+
+        if (family === FAMILY_ANONYMOUS_COLOR) {
+            return {ok:false, status:"ANONYMOUS_COLOR_REQUIRES_DOCUMENT_BINDING", state:state};
+        }
+
+        state.specifier = safeSpecifier(obj);
+
+        if (family === FAMILY_FONT) {
+            state.postscriptName = stringProp(obj, "postscriptName");
+            state.fullName = stringProp(obj, "fullName");
+            state.name = stringProp(obj, "name");
+            if (state.postscriptName.length === 0 &&
+                state.fullName.length === 0 &&
+                state.name.length === 0) {
+                return {ok:false, status:STATUS_INCOMPLETE_IDENTITY, state:state};
+            }
+            return {ok:true, status:STATUS_SERIALIZED, state:state};
+        }
+
+        state.name = stringProp(obj, "name");
+        state.id = objectId(obj);
+
+        if (family === FAMILY_CHARACTER_STYLE ||
+            family === FAMILY_PARAGRAPH_STYLE ||
+            family === FAMILY_NAMED_SWATCH_COLOR) {
+            state.path = qualifiedPath(obj);
+        }
+
+        if (state.name.length === 0) {
+            return {ok:false, status:STATUS_INCOMPLETE_IDENTITY, state:state};
+        }
+
+        if ((family === FAMILY_CHARACTER_STYLE ||
+             family === FAMILY_PARAGRAPH_STYLE) &&
+            state.path.length === 0) {
+            return {ok:false, status:STATUS_INCOMPLETE_IDENTITY, state:state};
+        }
+
+        return {ok:true, status:STATUS_SERIALIZED, state:state};
+    }
+
+    function serialize(obj, docRef) {
+        var family = familyFor(obj);
+        if (family === FAMILY_ANONYMOUS_COLOR) {
+            return serializeAnonymousColor(obj, docRef);
+        }
+        return serializeIdentified(obj);
+    }
+
+    function collectionItems(collection) {
+        var out = [];
+        var i, item;
+
+        if (!collection) { return out; }
+
+        try {
+            if (collection instanceof Array) {
+                for (i = 0; i < collection.length; i++) {
+                    if (valid(collection[i])) { out.push(collection[i]); }
+                }
+                return out;
+            }
+        } catch (eArray) {}
+
+        try {
+            for (i = 0; i < collection.length; i++) {
+                try {
+                    item = collection.item ? collection.item(i) : collection[i];
+                    if (valid(item)) { out.push(item); }
+                } catch (eItem) {}
+            }
+        } catch (eCollection) {}
+
+        return out;
+    }
+
+    function styleCandidates(docRef, family) {
+        var source = null;
+        var out = [];
+
+        try {
+            source = family === FAMILY_CHARACTER_STYLE ?
+                docRef.allCharacterStyles : docRef.allParagraphStyles;
+        } catch (eAll) {
+            source = null;
+        }
+
+        out = collectionItems(source);
+        if (out.length > 0) { return out; }
+
+        try {
+            source = family === FAMILY_CHARACTER_STYLE ?
+                docRef.characterStyles : docRef.paragraphStyles;
+        } catch (eTop) {
+            source = null;
+        }
+
+        return collectionItems(source);
+    }
+
+    function candidates(docRef, state) {
+        var source = null;
+        var langs;
+
+        if (state.family === FAMILY_CHARACTER_STYLE ||
+            state.family === FAMILY_PARAGRAPH_STYLE) {
+            return styleCandidates(docRef, state.family);
+        }
+
+        if (state.family === FAMILY_LANGUAGE) {
+            try { source = app.languagesWithVendors; }
+            catch (eLangVendor) { source = null; }
+
+            langs = collectionItems(source);
+            if (langs.length > 0) { return langs; }
+
+            try { source = app.languages; }
+            catch (eLang) { source = null; }
+            return collectionItems(source);
+        }
+
+        if (state.family === FAMILY_NAMED_SWATCH_COLOR) {
+            try { source = docRef.swatches; }
+            catch (eSwatch) { source = null; }
+            return collectionItems(source);
+        }
+
+        if (state.family === FAMILY_STROKE_STYLE) {
+            try { source = docRef.strokeStyles; }
+            catch (eStroke) { source = null; }
+            return collectionItems(source);
+        }
+
+        if (state.family === FAMILY_NUMBERING_LIST) {
+            try { source = docRef.numberingLists; }
+            catch (eList) { source = null; }
+            return collectionItems(source);
+        }
+
+        if (state.family === FAMILY_FONT) {
+            try { source = app.fonts; }
+            catch (eFont) { source = null; }
+            return collectionItems(source);
+        }
+
+        return [];
+    }
+
+    function describeIdentified(obj) {
+        var family = familyFor(obj);
+        var d = {
+            family: family,
+            typeName: typeName(obj),
+            name: "",
+            path: "",
+            id: "",
+            postscriptName: "",
+            fullName: ""
+        };
+
+        if (family === FAMILY_UNSUPPORTED ||
+            family === FAMILY_ANONYMOUS_COLOR) {
+            return d;
+        }
+
+        if (family === FAMILY_FONT) {
+            d.postscriptName = stringProp(obj, "postscriptName");
+            d.fullName = stringProp(obj, "fullName");
+            d.name = stringProp(obj, "name");
+            return d;
+        }
+
+        d.name = stringProp(obj, "name");
+        d.id = objectId(obj);
+
+        if (family === FAMILY_CHARACTER_STYLE ||
+            family === FAMILY_PARAGRAPH_STYLE ||
+            family === FAMILY_NAMED_SWATCH_COLOR) {
+            d.path = qualifiedPath(obj);
+        }
+
+        return d;
+    }
+
+    function primaryMatches(obj, state) {
+        var d = describeIdentified(obj);
+
+        if (state.family === FAMILY_FONT) {
+            if (state.postscriptName.length > 0) {
+                return primitiveEqual(d.postscriptName, state.postscriptName);
+            }
+            if (state.fullName.length > 0) {
+                return primitiveEqual(d.fullName, state.fullName);
+            }
+            return primitiveEqual(d.name, state.name);
+        }
+
+        if (!primitiveEqual(d.family, state.family)) { return false; }
+        if (!primitiveEqual(d.name, state.name)) { return false; }
+
+        if (state.family === FAMILY_CHARACTER_STYLE ||
+            state.family === FAMILY_PARAGRAPH_STYLE) {
+            return primitiveEqual(d.path, state.path);
+        }
+
+        if (state.path.length > 0 && d.path.length > 0 &&
+            !primitiveEqual(d.path, state.path)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function findById(items, state) {
+        var i;
+        if (!state.id || state.id.length === 0) { return null; }
+        for (i = 0; i < items.length; i++) {
+            if (primitiveEqual(objectId(items[i]), state.id)) {
+                return items[i];
+            }
+        }
+        return null;
+    }
+
+    function normalizeResolved(raw) {
+        if (raw instanceof Array) {
+            if (raw.length !== 1) {
+                return {ok:false, candidate:null, cardinality:raw.length};
+            }
+            return {ok:valid(raw[0]), candidate:raw[0], cardinality:1};
+        }
+        return {ok:valid(raw), candidate:raw, cardinality:valid(raw) ? 1 : 0};
+    }
+
+    function resolveSpecifierState(state) {
+        var raw;
+        if (!state.specifier || state.specifier.length === 0) {
+            return {attempted:false, ok:true, candidate:null};
+        }
+        try {
+            raw = resolve(state.specifier);
+        } catch (eResolve) {
+            return {
+                attempted:true,
+                ok:false,
+                status:STATUS_SPECIFIER_IDENTITY_CONFLICT,
+                detail:"specifier resolution threw: " + safeString(eResolve.message)
+            };
+        }
+        var normalized = normalizeResolved(raw);
+        if (!normalized.ok) {
+            return {
+                attempted:true,
+                ok:false,
+                status:STATUS_SPECIFIER_IDENTITY_CONFLICT,
+                detail:"specifier did not resolve exactly one valid object"
+            };
+        }
+        return {attempted:true, ok:true, candidate:normalized.candidate};
+    }
+
+    function sameIdentifiedPrimitiveIdentity(a, b, state) {
+        var da = describeIdentified(a);
+        var db = describeIdentified(b);
+
+        if (!primitiveEqual(da.family, db.family)) { return false; }
+        if (!primitiveEqual(da.typeName, db.typeName)) { return false; }
+
+        if (state.family === FAMILY_FONT) {
+            if (state.postscriptName.length > 0) {
+                return primitiveEqual(da.postscriptName, db.postscriptName);
+            }
+            if (state.fullName.length > 0) {
+                return primitiveEqual(da.fullName, db.fullName);
+            }
+            return primitiveEqual(da.name, db.name);
+        }
+
+        if (!primitiveEqual(da.name, db.name)) { return false; }
+        if (state.family === FAMILY_CHARACTER_STYLE ||
+            state.family === FAMILY_PARAGRAPH_STYLE) {
+            if (!primitiveEqual(da.path, db.path)) { return false; }
+        }
+        if (state.id && state.id.length > 0) {
+            if (!primitiveEqual(da.id, db.id)) { return false; }
+        }
+        return true;
+    }
+
+    function resolveIdentified(docRef, state) {
+        var items, matches = [];
+        var byId, i, specifierCheck;
+
+        items = candidates(docRef, state);
+
+        for (i = 0; i < items.length; i++) {
+            try {
+                if (valid(items[i]) && primaryMatches(items[i], state)) {
+                    matches.push(items[i]);
+                }
+            } catch (eMatch) {}
+        }
+
+        if (matches.length > 1) {
+            return {
+                ok:false,
+                status:STATUS_AMBIGUOUS_IDENTITY,
+                matchCount:matches.length
+            };
+        }
+
+        if (matches.length === 0) {
+            byId = findById(items, state);
+            if (valid(byId)) {
+                return {
+                    ok:false,
+                    status:STATUS_IDENTITY_CONFLICT,
+                    candidate:byId,
+                    detail:"supplemental ID resolves but semantic identity differs"
+                };
+            }
+            return {
+                ok:false,
+                status:STATUS_UNRESOLVED_IDENTITY,
+                matchCount:0
+            };
+        }
+
+        if (state.id && state.id.length > 0 &&
+            !primitiveEqual(objectId(matches[0]), state.id)) {
+            return {
+                ok:false,
+                status:STATUS_IDENTITY_CONFLICT,
+                candidate:matches[0],
+                detail:"semantic identity matches but supplemental ID differs"
+            };
+        }
+
+        specifierCheck = resolveSpecifierState(state);
+        if (!specifierCheck.ok) { return specifierCheck; }
+        if (specifierCheck.attempted &&
+            !sameIdentifiedPrimitiveIdentity(specifierCheck.candidate, matches[0], state)) {
+            return {
+                ok:false,
+                status:STATUS_SPECIFIER_IDENTITY_CONFLICT,
+                detail:"specifier resolved a different identified object"
+            };
+        }
+
+        return {
+            ok:true,
+            status:STATUS_RESOLVED,
+            candidate:matches[0],
+            matchCount:1
+        };
+    }
+
+    function resolveAnonymousColor(docRef, state) {
+        var docId;
+        var raw, normalized, c;
+        var binding;
+        var actualValue;
+
+        if (!valid(docRef)) {
+            return {ok:false, status:STATUS_RESOLVE_FAILED, detail:"bound document is invalid"};
+        }
+
+        docId = objectId(docRef);
+        if (state.documentId.length === 0 ||
+            !primitiveEqual(docId, state.documentId)) {
+            return {
+                ok:false,
+                status:STATUS_IDENTITY_CONFLICT,
+                detail:"bound document does not match anonymous Color snapshot"
+            };
+        }
+
+        if (state.name.length !== 0 || state.specifier.length === 0) {
+            return {ok:false, status:STATUS_INVALID_STATE};
+        }
+
+        try {
+            raw = resolve(state.specifier);
+        } catch (eResolve) {
+            return {
+                ok:false,
+                status:STATUS_RESOLVE_FAILED,
+                detail:"anonymous Color specifier did not resolve"
+            };
+        }
+
+        normalized = normalizeResolved(raw);
+        if (!normalized.ok) {
+            return {
+                ok:false,
+                status:STATUS_RESOLVE_FAILED,
+                detail:"anonymous Color specifier did not resolve exactly one valid object"
+            };
+        }
+
+        c = normalized.candidate;
+        binding = documentBinding(c);
+
+        if (!primitiveEqual(typeName(c), state.typeName) ||
+            !primitiveEqual(objectId(c), state.id) ||
+            stringProp(c, "name").length !== 0 ||
+            !primitiveEqual(binding.id, state.documentId)) {
+            return {
+                ok:false,
+                status:STATUS_SPECIFIER_IDENTITY_CONFLICT,
+                detail:"anonymous Color primitive identity tuple changed"
+            };
+        }
+
+        try {
+            if (!primitiveEqual(enumText(c.model), state.model) ||
+                !primitiveEqual(enumText(c.space), state.space)) {
+                return {
+                    ok:false,
+                    status:STATUS_SPECIFIER_IDENTITY_CONFLICT,
+                    detail:"anonymous Color model or space changed"
+                };
+            }
+        } catch (eModelSpace) {
+            return {
+                ok:false,
+                status:STATUS_SPECIFIER_IDENTITY_CONFLICT,
+                detail:"anonymous Color model/space read failed"
+            };
+        }
+
+        try {
+            actualValue = numberArray(c.colorValue);
+        } catch (eValue) {
+            actualValue = null;
+        }
+        if (!(actualValue instanceof Array) ||
+            !sameNumberArray(actualValue, state.value)) {
+            return {
+                ok:false,
+                status:STATUS_SPECIFIER_IDENTITY_CONFLICT,
+                detail:"anonymous Color value changed"
+            };
+        }
+
+        return {
+            ok:true,
+            status:STATUS_RESOLVED,
+            candidate:c,
+            matchCount:1
+        };
+    }
+
+    function stateShapeValid(state) {
+        return state &&
+               state.kind === "host_identity" &&
+               typeof state.contractVersion === "string" &&
+               typeof state.family === "string";
+    }
+
+    function resolveIdentity(docRef, state) {
+        if (!stateShapeValid(state)) {
+            return {ok:false, status:STATUS_INVALID_STATE};
+        }
+        if (!primitiveEqual(state.contractVersion, CONTRACT_VERSION)) {
+            return {ok:false, status:STATUS_CONTRACT_VERSION_MISMATCH};
+        }
+        if (state.family === FAMILY_UNSUPPORTED) {
+            return {ok:false, status:STATUS_UNSUPPORTED_TYPE};
+        }
+        if (state.family === FAMILY_ANONYMOUS_COLOR) {
+            return resolveAnonymousColor(docRef, state);
+        }
+        return resolveIdentified(docRef, state);
+    }
+
+    function isRefusalStatus(status) {
+        return status === STATUS_UNSUPPORTED_TYPE ||
+               status === STATUS_INCOMPLETE_IDENTITY ||
+               status === STATUS_UNRESOLVED_IDENTITY ||
+               status === STATUS_AMBIGUOUS_IDENTITY ||
+               status === STATUS_IDENTITY_CONFLICT ||
+               status === STATUS_SPECIFIER_IDENTITY_CONFLICT ||
+               status === STATUS_RESOLVE_FAILED;
+    }
+
+    function containsLiveHostObject(value, depth) {
+        var key, i, t, rt;
+        var d = depth || 0;
+
+        if (d > 16) { return true; }
+        if (typeof value === "undefined") { return false; }
+
+        t = typeof value;
+        if (t === "string" || t === "number" || t === "boolean") {
+            return false;
+        }
+        if (t === "function") { return true; }
+
+        if (value instanceof Array) {
+            for (i = 0; i < value.length; i++) {
+                if (containsLiveHostObject(value[i], d + 1)) { return true; }
+            }
+            return false;
+        }
+
+        if (t !== "object") { return false; }
+        if (!value) { return false; }
+
+        try {
+            if (typeof value.toSpecifier === "function") { return true; }
+        } catch (eSpecifier) {
+            return true;
+        }
+
+        try {
+            if (value.reflect && value.reflect.name) {
+                rt = String(value.reflect.name);
+                if (rt !== "Object") { return true; }
+            }
+        } catch (eReflect) {}
+
+        for (key in value) {
+            try {
+                if (value.hasOwnProperty && !value.hasOwnProperty(key)) {
+                    continue;
+                }
+            } catch (eOwn) {}
+            if (containsLiveHostObject(value[key], d + 1)) { return true; }
+        }
+
+        return false;
+    }
+
+    return {
+        VERSION: VERSION,
+        CONTRACT_VERSION: CONTRACT_VERSION,
+
+        FAMILY_LANGUAGE: FAMILY_LANGUAGE,
+        FAMILY_CHARACTER_STYLE: FAMILY_CHARACTER_STYLE,
+        FAMILY_PARAGRAPH_STYLE: FAMILY_PARAGRAPH_STYLE,
+        FAMILY_NAMED_SWATCH_COLOR: FAMILY_NAMED_SWATCH_COLOR,
+        FAMILY_FONT: FAMILY_FONT,
+        FAMILY_STROKE_STYLE: FAMILY_STROKE_STYLE,
+        FAMILY_NUMBERING_LIST: FAMILY_NUMBERING_LIST,
+        FAMILY_ANONYMOUS_COLOR: FAMILY_ANONYMOUS_COLOR,
+
+        STATUS_SERIALIZED: STATUS_SERIALIZED,
+        STATUS_RESOLVED: STATUS_RESOLVED,
+        STATUS_INVALID_STATE: STATUS_INVALID_STATE,
+        STATUS_CONTRACT_VERSION_MISMATCH: STATUS_CONTRACT_VERSION_MISMATCH,
+        STATUS_UNSUPPORTED_TYPE: STATUS_UNSUPPORTED_TYPE,
+        STATUS_INCOMPLETE_IDENTITY: STATUS_INCOMPLETE_IDENTITY,
+        STATUS_UNRESOLVED_IDENTITY: STATUS_UNRESOLVED_IDENTITY,
+        STATUS_AMBIGUOUS_IDENTITY: STATUS_AMBIGUOUS_IDENTITY,
+        STATUS_IDENTITY_CONFLICT: STATUS_IDENTITY_CONFLICT,
+        STATUS_SPECIFIER_IDENTITY_CONFLICT: STATUS_SPECIFIER_IDENTITY_CONFLICT,
+        STATUS_RESOLVE_FAILED: STATUS_RESOLVE_FAILED,
+
+        primitiveEqual: primitiveEqual,
+        familyFor: familyFor,
+        serialize: serialize,
+        resolve: resolveIdentity,
+        isRefusalStatus: isRefusalStatus,
+        containsLiveHostObject: containsLiveHostObject
+    };
+}());
