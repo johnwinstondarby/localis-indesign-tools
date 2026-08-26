@@ -40,7 +40,7 @@ objects are never stored in serialized identity records.
 */
 
 var CoreIdentity = (function () {
-    var VERSION = "0.3.0-dev1";
+    var VERSION = "0.3.0-dev2";
     var CONTRACT_VERSION = "0.3.0";
 
     var FAMILY_LANGUAGE = "Language";
@@ -449,6 +449,23 @@ var CoreIdentity = (function () {
         }
 
         if (state.family === FAMILY_NAMED_SWATCH_COLOR) {
+            /*
+             * InDesign 21.5.1.73 exposes a named Color through doc.swatches
+             * as a Swatch proxy even though the serialized host object and
+             * resolve(specifier) result are concrete Color objects.
+             *
+             * Concrete-type corroboration therefore requires Color state to
+             * enumerate doc.colors. Other named swatch/color concrete types
+             * retain the existing swatch-surface behavior until their own
+             * production discrimination evidence establishes a narrower
+             * collection rule.
+             */
+            if (String(state.typeName || "") === "Color") {
+                try { source = docRef.colors; }
+                catch (eColor) { source = null; }
+                return collectionItems(source);
+            }
+
             try { source = docRef.swatches; }
             catch (eSwatch) { source = null; }
             return collectionItems(source);
