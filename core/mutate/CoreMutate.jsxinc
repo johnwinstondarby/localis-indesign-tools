@@ -25,7 +25,7 @@ createFileJournalWriter(). Synthetic tests inject host and journal services.
 */
 
 var CoreMutate = (function () {
-    var VERSION = "1.0.0-dev3";
+    var VERSION = "1.0.0-dev4";
     var MODE_LIVE = "LIVE";
     var MODE_DRY_RUN = "DRY_RUN";
 
@@ -958,28 +958,98 @@ var CoreMutate = (function () {
     }
 
     function createFileJournalWriter(path) {
-        var file;
+        var journalFile;
+        var firstWrite = true;
+
         if (typeof File === "undefined") {
             throw new Error("ExtendScript File API is unavailable.");
         }
-        file = new File(path);
-        if (!file.parent.exists && !file.parent.create()) {
-            throw new Error("Could not create journal directory: " + file.parent.fsName);
+
+        journalFile = new File(path);
+
+        if (!journalFile.parent.exists && !journalFile.parent.create()) {
+            throw new Error("Could not create journal directory: " + journalFile.parent.fsName);
         }
-        file.encoding = "UTF-8";
-        file.lineFeed = "Windows";
-        if (!file.open("w")) {
-            throw new Error("Could not open journal file: " + file.fsName);
-        }
+
         return {
             write: function (kind, record) {
-                file.writeln(String(kind) + "\t" + canonicalSerialize(record));
-                if (typeof file.flush === "function") { file.flush(); }
+                var file = new File(journalFile.fsName);
+                var writeOk = false;
+                var closeOk = true;
+                var failure = null;
+                var errorText = "";
+
+                file.encoding = "UTF-8";
+                file.lineFeed = "Windows";
+
+                if (!file.open(firstWrite ? "w" : "a")) {
+                    throw new Error("Could not open journal file: " + file.fsName);
+                }
+
+                firstWrite = false;
+
+                try {
+                    writeOk = file.writeln(
+                        String(kind) + "\t" + canonicalSerialize(record)
+                    );
+
+                    if (writeOk !== true) {
+                        try { errorText = String(file.error || ""); }
+                        catch (eErrorText) { errorText = ""; }
+
+                        throw new Error(
+                            "Could not write journal record: " +
+                            file.fsName +
+                            (errorText.length > 0 ? " | " + errorText : "")
+                        );
+                    }
+
+                    if (typeof file.flush === "function") {
+                        file.flush();
+                    }
+
+                    try { errorText = String(file.error || ""); }
+                    catch (ePostWriteError) { errorText = ""; }
+
+                    if (errorText.length > 0) {
+                        throw new Error(
+                            "Journal file error after write: " +
+                            file.fsName +
+                            " | " +
+                            errorText
+                        );
+                    }
+                } catch (eWrite) {
+                    failure = eWrite;
+                }
+
+                try {
+                    if (file.opened) {
+                        closeOk = file.close();
+
+                        if (closeOk === false && !failure) {
+                            failure = new Error(
+                                "Could not close journal file: " +
+                                file.fsName
+                            );
+                        }
+                    }
+                } catch (eClose) {
+                    if (!failure) {
+                        failure = eClose;
+                    }
+                }
+
+                if (failure) {
+                    throw failure;
+                }
             },
+
             close: function () {
-                if (file.opened) { file.close(); }
+                /* Each logical record is flushed and closed by write(). */
             },
-            path: file.fsName
+
+            path: journalFile.fsName
         };
     }
 
