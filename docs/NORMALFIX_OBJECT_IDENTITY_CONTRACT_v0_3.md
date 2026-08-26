@@ -1,12 +1,12 @@
 # NormalFix Object-Reference Identity Contract v0.3
 
-**Status:** SAFETY AMENDMENT CANDIDATE — August 23, 2026.
+**Status:** FROZEN — August 25, 2026.
 **Baseline:** v0.2, frozen August 22, 2026.
-**Adoption state:** NormalFix adapter implementation is blocked until the v0.3 freeze gates in §17 pass.
+**Adoption state:** v0.3 is the binding identity contract for NormalFix adapter implementation and conformance.
 
 **Reason for amendment:** During NormalFix `core/mutate` adapter construction, the frozen 243-key rollback registry was cross-checked against the frozen v0.2 identity families. Two reconstructive/required keys, `paragraph.kinsokuSet` and `paragraph.mojikumi`, can hold document-resident `KinsokuTable` and `MojikumiTable` objects, but v0.2 did not register either identity family. The disagreement resolved in the unsafe direction: rollback coverage was declared for values the shared identity layer would return as `UNSUPPORTED_TYPE`.
 
-v0.2 remains in the repository as the historical freeze record. v0.3 supersedes v0.2 for future NormalFix adoption only after the amendment gates pass.
+v0.2 remains in the repository as the historical freeze record. v0.3 supersedes v0.2 for future NormalFix adoption.
 
 ## 1. Principle
 
@@ -356,24 +356,24 @@ This requirement belongs to the shared DOM contract surface, not to object ident
 
 ## 17. Amendment freeze record and adoption rule
 
-v0.3 may be marked **FROZEN** only after all of the following pass on the approved host, InDesign `21.5.1.73` / DOM `21.5`:
+v0.3 was marked **FROZEN** on August 25, 2026 after all eight conditions passed on the approved host, InDesign `21.5.1.73` / DOM `21.5`:
 
 1. the shared `CoreIdentity` implementation registers KinsokuTable and MojikumiTable with the rules in §2;
-2. the amended adversarial refusal canary passes 16/16;
-3. ScriptWatch independently reports successful completion for the amended canary;
-4. the sentinel normalization gate in §15 passes;
-5. the registry-to-identity coverage cross-check in §13 passes against the frozen 243-key NormalFix registry;
-6. snapshot state still contains no live host objects;
-7. no collection-index, built-in-roster, translated-name, or ID-only fallback exists for KinsokuTable or MojikumiTable;
-8. final review finds no remaining blocking safety case.
+2. the amended adversarial refusal canary passed 16/16;
+3. ScriptWatch independently reported successful completion for the amended canary;
+4. the sentinel normalization gate in §15 passed;
+5. the registry-to-identity coverage cross-check in §13 passed against the frozen 243-key NormalFix registry: 243 registry keys, 25 empirically host-object-capable keys, 25 explicit bindings, zero errors;
+6. snapshot-state evidence retained no live host objects;
+7. resolver review confirmed no collection-index, built-in-roster, translated-name, approximate-match, resource-content, creation/materialization, or ID-only fallback for KinsokuTable or MojikumiTable;
+8. final independent review found no remaining blocking safety case.
 
-Until all eight conditions pass:
+Freeze result:
 
-- v0.2 remains the last frozen identity baseline;
-- v0.3 remains an amendment candidate;
-- NormalFix production mutation must not adopt the incomplete identity surface.
+- v0.3 is the binding identity contract for NormalFix adapter implementation and conformance;
+- v0.2 remains the historical frozen identity baseline;
+- NormalFix adapter implementation may proceed under the complete v0.3 identity surface.
 
-After freeze, v0.3 is the binding identity contract for NormalFix adapter implementation and conformance. Future host builds must requalify version-bound claims, including anonymous-Color ID non-reuse, Kinsoku/Mojikumi return shape, built-in resource behavior, and any localization-dependent identity behavior.
+Production adoption still depends on NormalFix adapter conformance. Future host builds must requalify version-bound claims, including anonymous-Color ID non-reuse, Kinsoku/Mojikumi return shape, built-in resource behavior, and localization-dependent identity behavior.
 
 ## 18. Amendment evidence and provenance
 
