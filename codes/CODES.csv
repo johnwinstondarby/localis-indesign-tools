@@ -1,1 +1,8 @@
 Code,Tool,Family,Severity,Meaning,Remediable,OwnershipRegion
+TF-001,TableFix,Table formatting,WARNING,"HIGH-confidence non-complex table requires header-semantic or paragraph-style remediation.",Yes,"Table paragraph formatting and header semantics for eligible HIGH-confidence non-complex tables"
+TF-002,TableFix,Visual header review,REVIEW,"Top row partially matches the visual-header signature; automatic remediation is unavailable.",No,"Table paragraph formatting and header semantics for REVIEW visual-header candidates"
+TF-003,TableFix,Complex table,REVIEW,"Merged/spanned or multi-header-row table requires review; automatic remediation is unavailable.",No,"Table paragraph formatting and header semantics for structurally complex tables"
+TF-004,TableFix,Required styles,ERROR,"One or more required TableFix paragraph styles are missing or ambiguous.",No,"Table paragraph formatting where required TableFix paragraph styles cannot be resolved"
+TF-005,TableFix,Non-visual table formatting,WARNING,"Non-complex table without qualifying visual-header evidence has paragraph-style or paragraph-only override discrepancies.",No,"Table paragraph formatting in standard tables without qualifying visual-header evidence"
+TF-006,TableFix,Registration fill,WARNING,"Registration is used in the top row of a non-complex table and does not qualify as process Black.",No,"Top-row fill semantics in non-complex tables"
+TF-007,TableFix,Single-cell table,REVIEW,"Single-cell table is outside the standard table-schema normalization path and remains review-only.",No,"Single-cell table paragraph formatting and purpose classification"

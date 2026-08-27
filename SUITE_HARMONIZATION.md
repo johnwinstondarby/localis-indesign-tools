@@ -280,15 +280,15 @@ Every region in the census universe has exactly one owner. Reporting overlap is 
 
 Ownership follows the stable document region rather than the current detector. A detection gap does not create a new owner.
 
-This rule is binding for tables. TableFix owns paragraph formatting inside tables even where its current implementation does not yet inspect the full population.
+This rule is binding for tables. TableFix owns paragraph formatting inside tables. Detection coverage is recorded independently and follows the current verified implementation.
 
 ### Detection coverage is independent of ownership
 
-The Step #8 source census established that the previous table map overstated TableFix coverage.
+The Step #8 opening source census established that the previous table map overstated TableFix coverage.
 
-NormalFix excludes every paragraph inside a table before testing for `Normal`. TableFix iterates every table, but its current `auditTable()` returns before the paragraph-style audit when the top row does not qualify under the visual-header detector. Paragraph formatting in an ordinary non-visual-header table can therefore be owned by TableFix while remaining invisible to the current TableFix implementation.
+NormalFix excludes every paragraph inside a table before testing for `Normal`. At the opening TableFix pin, `50613a468c0e034953b32007917c953329b4093c`, `auditTable()` returned before the paragraph-style audit when the top row did not qualify under the visual-header detector. Paragraph formatting in an ordinary non-visual-header table could therefore be owned by TableFix while remaining invisible to that implementation.
 
-The repair is to decouple the paragraph audit from the visual-header gate. Paragraph auditing runs for every table. Header-specific findings and automatic header remediation remain governed by the header-confidence and complexity rules.
+TableFix v1.2 closes that detection gap at commit `67bea87c99c2bd0214f0330f6c8c5cebdd6f5db8`. Paragraph auditing now runs independently for every table before header-specific classification. Header inference and automatic remediation remain governed by visual-header confidence, structural complexity, single-cell classification, and Registration-fill refusal rules.
 
 ### Authority `NONE` must reach the operator
 
@@ -372,7 +372,7 @@ This sequence is authoritative unless a new safety or correctness finding requir
    Direct-production LIVE canary: `PASS=7`, `FAIL=0`. Residual current-source CoreMutate canary: `PASS=5`, `FAIL=0`. Full actuals are frozen in §8.7.
 
 8. **Freeze ownership, detection coverage, and remediation authority. — ACTIVE**
-   Complete the source-verified region and action census, remove DocStats `EPUB-004` mutation authority, decouple the TableFix paragraph audit from the visual-header gate, close operator-message gaps for `NONE` authority, and freeze `ownership/OWNERSHIP.md`. Acceptance criteria are defined in §9.
+   TableFix paragraph-audit decoupling and runtime proof are complete at v1.2 (`67bea87c99c2bd0214f0330f6c8c5cebdd6f5db8`). Continue the source-verified region and action census, remove DocStats `EPUB-004` mutation authority, close remaining operator-message and finding-registry conformance gaps, run the cross-tool ownership canary, and freeze `ownership/OWNERSHIP.md`. Acceptance criteria are defined in §9.
 
 9. **Adopt `core/mutate` in DocStats.**
    Start with `relinkAsset`, then the remaining actions DocStats still owns.
@@ -762,3 +762,73 @@ The source-authority discrepancy is recorded as:
 `DS-CENSUS-001 — Production source authority unresolved`
 
 This is an artifact-versus-record disagreement. It blocks Step #9 code adoption, not Step #8 census and documentation work.
+
+### 9.2 TableFix v1.2 runtime-verified actuals
+
+TableFix v1.2 is published on `main` at:
+
+```
+67bea87c99c2bd0214f0330f6c8c5cebdd6f5db8
+Refine TableFix v1.2 detection and census
+```
+
+The final published `TableFix.jsx` SHA-256 is:
+
+```
+FD6CB5E6C9184B846B2738454A53BAA59EC0F6EE959A6505C79FA7CF00B1AFD5
+```
+
+The production read-only discrimination scan was run against the immediately preceding v1.2 candidate SHA-256 `A6506FF2071F41B4A8DB377007E09347655F04EA29D38A0354B7E6C53325F7F6`. It audited 108 production tables and established the expected new classifications, including:
+
+- single-cell page 272 and page 275 structures as `TF-007`, with no automatic remediation;
+- the page 335 merged/spanned table as `TF-003`, regardless of visual-header qualification;
+- the page 562 Registration-filled header as `TF-006`, with Registration excluded from process-Black qualification;
+- additional Registration findings on pages 255 and 257; and
+- the page 266 non-visual paragraph-formatting condition as `TF-005`.
+
+The only source change after that production scan was the silent-clean-table CLI census correction. It moved `CLI Code Red Table` run counting ahead of the clean non-visual silent return and did not alter table classification or mutation eligibility. The final source with that correction was then exercised by the disposable v2 canary.
+
+The final disposable detection canary created seven tables and produced the expected matrix:
+
+| Case | Expected result | Runtime result |
+|---|---|---|
+| T01 | `TF-001`, HIGH, fixable | PASS |
+| T02 | `TF-002`, REVIEW, no remediation | PASS |
+| T03 | `TF-003`, complex, no remediation | PASS |
+| T04 | `TF-006`, Registration, no remediation | PASS |
+| T05 | `TF-007`, single-cell, no remediation | PASS |
+| T06 | `TF-005`, non-visual paragraph finding, no remediation | PASS |
+| T07 | clean non-visual, silent | PASS |
+
+The initial canary summary reported seven scanned and seven audited tables, one HIGH visual candidate, one REVIEW visual candidate, one non-visual paragraph finding, one Registration-fill finding, one complex finding, one single-cell review finding, one fixable table, and one `CLI Code Red Table` run.
+
+T01 was then selected as the only mutation target. The selected-remediation run reported:
+
+```
+Corrected and verified: 1
+Skipped: 0
+Could not verify: 0
+Cell fills restored after semantic changes: 0
+```
+
+The automatic rescan established:
+
+- T01 remained HIGH;
+- T01 changed to `PASS`;
+- `HEADER_ROW` became present;
+- expected paragraph styles were clean;
+- `Fully compliant` changed from 0 to 1;
+- outstanding `Fixable` changed from 1 to 0;
+- the `CLI Code Red Table` run remained present;
+- body cell fills remained unchanged; and
+- T02 through T06 remained unchanged while T07 remained silent.
+
+`TF-CENSUS-001 — Paragraph audit is gated by visual-header detection` is therefore **CLOSED / PASS**.
+
+The final v1.2 evidence establishes TableFix ownership implementation for paragraph-formatting detection across ordinary, REVIEW, complex, Registration, and single-cell table populations while preserving the existing selection-only mutation boundary for eligible HIGH-confidence non-complex tables.
+
+#### TF-CENSUS-002 — TableFix REVIEW severity/classification mismatch
+
+Step #8 also exposed a remaining finding-model conformance issue. TableFix v1.2 currently emits `REVIEW` in the CSV `Severity` field for `TF-002`, `TF-003`, and `TF-007`. Section 4 reserves `ERROR`, `WARNING`, `INFO`, and `PASS` for the shared severity axis and describes TableFix `REVIEW` as classification.
+
+`codes/CODES.csv` records the current production-emitted values while Step #8 remains active. AC08-11 and the Step #8 freeze gate remain open until the suite decides whether TableFix output is normalized to the shared severity axis or the registry contract is revised explicitly.
