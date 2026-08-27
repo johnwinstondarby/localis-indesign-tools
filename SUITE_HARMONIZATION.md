@@ -3,7 +3,7 @@
 **Scope:** DocStats, HeaderFix, NormalFix, TableFix
 **Deferred:** StyleFix adopts after its v1.0.8 canary passes. Nothing here requires a change to StyleFix while that work is in progress, and the contracts below are written so StyleFix can adopt them without redesign.
 **Cross-cutting suite service:** ScriptWatch spans the tool suite as shared observability infrastructure and does not own document regions. Suite tools adopt the ScriptWatch Harness so they can publish job semantics to the ScriptWatch console. External or community scripts may opt in to the same Harness contract. ScriptWatch retains agentless process and host telemetry when no Harness is present.
-**Status:** Active harmonization specification. Steps #1 through #4 are closed and frozen as of August 22, 2026. Editorial authority is John Darby.
+**Status:** Active harmonization specification. Steps #1 through #7 are closed and frozen as of August 26, 2026. Editorial authority is John Darby.
 
 **Canonical location:** this document lives in the `localis-indesign-tools` repository and is the single authoritative copy. Tool repositories link to it and never carry their own divergent copy.
 
@@ -304,11 +304,15 @@ This sequence is authoritative unless a new safety or correctness finding requir
 
    **Permanent source-authority rule:** after #5, no new shared module is developed as a copied implementation inside a tool repository. Tool repositories consume shared source; they do not fork it. This rule is repeated in `CONTRIBUTING.md`.
 
-6. **Implement the NormalFix `core/mutate` adapter from the shared repository.**
-   Snapshot, independent digest, mutation, read-back verification, rollback, durable journal, target re-resolution, and frozen identity behavior.
+6. **Implement the NormalFix `core/mutate` adapter from the shared repository. — CLOSED / PASS**
+   Production adapter `NormalFix/src/NormalFixMutateAdapter.jsxinc` completed at adapter version `0.1.0-dev3`. Final rollback reconstruction behavior was committed in NormalFix as `b1a849cd7b1cc4f8a7584a958765f0b1061b99e4`. The adapter consumes shared `CoreMutate` `1.0.0-dev4` and frozen `CoreIdentity` `0.3.0-dev2`. Snapshot, independent 243-key digest, mutation, live read-back verification, rollback, durable journal, target re-resolution, and frozen identity behavior are implemented.
 
-7. **Pass NormalFix adapter conformance.**
-   AC01–AC05 plus repair, refusal, rollback, hard-stop, journal, deterministic ordering, and one-step Undo.
+7. **Pass NormalFix adapter conformance. — CLOSED / PASS**
+   AC01–AC05 passed together with successful repair, refusal, rollback, hard-stop, durable journal, deterministic ordering, target re-resolution, exact rollback digest equality, and one-step Undo. Production conformance metadata was activated separately in NormalFix commit `c57a25e94b0aa4a3691a8bff625c76bb2e0516aa`.
+
+   Final production adapter SHA-256: `28A206897B74727DCDC2B63FF1F0236A5615B4C526E4663664DBDE20FE89B3D0`.
+
+   Direct-production LIVE canary: `PASS=7`, `FAIL=0`. Residual current-source CoreMutate canary: `PASS=5`, `FAIL=0`. Full actuals are frozen in §8.7.
 
 8. **Settle ownership boundaries.**
    Make DocStats `EPUB-004` report-only, resolve the complex-table Normal+ gap, and freeze `ownership/OWNERSHIP.md` before other mutation adapters.
@@ -455,3 +459,89 @@ A shared-core contract moves into production only after:
 6. the proven implementation is reviewed for promotion into shared source.
 
 This is the default suite engineering method for the remaining harmonization sequence.
+
+### 8.7 NormalFix production-adapter conformance actuals
+
+NormalFix Step #7 closed on August 26, 2026.
+
+The production adapter is:
+
+```
+NormalFix/src/NormalFixMutateAdapter.jsxinc
+Adapter version: 0.1.0-dev3
+Conformance version: 0.1.0-dev3
+Conformance date: 2026-08-26
+```
+
+The final production adapter SHA-256 after conformance activation is:
+
+```
+28A206897B74727DCDC2B63FF1F0236A5615B4C526E4663664DBDE20FE89B3D0
+```
+
+The activation commit is:
+
+```
+c57a25e94b0aa4a3691a8bff625c76bb2e0516aa
+Activate NormalFix adapter conformance
+```
+
+The production reconstruction immediately preceding activation was committed as:
+
+```
+b1a849cd7b1cc4f8a7584a958765f0b1061b99e4
+Fix NormalFix rollback reconstruction
+```
+
+Conformance established:
+
+- AC01 locator stability;
+- AC02 direct rollback-digest provenance, including exact 243-key digest coverage, snapshot/digest independence, and live DOM read-back;
+- AC03 successful LIVE repair and real rollback through the production adapter;
+- AC04 idempotent precheck behavior;
+- AC05 `NOT_APPLICABLE` sentinel behavior;
+- deterministic target ordering;
+- rollback-not-ready refusal before mutation;
+- `HARD_STOP` behavior after rollback failure;
+- journal durability;
+- target re-resolution before verification;
+- exact rollback digest coverage and exact post-rollback digest equality;
+- one-step InDesign Undo;
+- successful mutation verification;
+- canonical Normal state after repair; and
+- production LIVE gating.
+
+The residual current-source CoreMutate canary passed:
+
+```
+PASS=5
+FAIL=0
+```
+
+Those gates covered current CoreMutate `1.0.0-dev4`, deterministic ordering, rollback-not-ready refusal, `HARD_STOP`, and one-step Undo.
+
+The final direct-production LIVE canary passed:
+
+```
+PASS=7
+FAIL=0
+```
+
+The direct-production canary passed the real production adapter object into `CoreMutate.transaction()` without a metadata-only facade. The committed transaction reported:
+
+```
+adapterId=NormalFix/core-mutate
+adapterVersion=0.1.0-dev3
+executionMode=LIVE
+finalState=COMMITTED
+verificationResult=PASS
+batchState=COMPLETE
+committed=1
+journalDurable=true
+lastConformanceVersion=0.1.0-dev3
+lastConformanceDate=2026-08-26
+```
+
+The disposable test document was used for conformance work. The production manuscript was not modified.
+
+NormalFix Step #7 remains closed unless new evidence demonstrates a defect. The production adapter is the known-good reference implementation for subsequent suite mutation adapters.
