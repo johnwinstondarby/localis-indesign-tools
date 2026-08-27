@@ -310,7 +310,9 @@ The Step #8 opening census also identified `DS-CENSUS-001`: `DocStats/main` does
 
 `DS-CENSUS-001` does not block Step #8 documentation and census work. It blocks Step #9 production adoption until the authoritative DocStats implementation is established on `main`.
 
----## 6. Repository metadata standard
+---
+
+## 6. Repository metadata standard
 
 Applies to the five document-tool repositories and to the ScriptWatch repository where applicable.
 
