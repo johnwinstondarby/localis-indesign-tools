@@ -245,17 +245,72 @@ Codes remain globally unique across the suite. A check whose meaning changes sub
 
 ## 5. Ownership map as an artifact
 
-The ownership boundary currently lives as prose in four separate READMEs, and the prose does not cover the whole document.
+`ownership/OWNERSHIP.md` is the single suite authority for document-region ownership, reporting, detection coverage, and remediation authority.
 
-One gap is already visible. NormalFix excludes every paragraph inside a table and defers to TableFix. TableFix refuses to remediate complex tables, which are those with merged or spanned cells or multiple header rows, marking them `TF-003` and never changing them. A `Normal+` paragraph inside a complex table is therefore excluded by NormalFix and declined by TableFix. It is owned by nobody, and nothing in either tool reports that condition.
+Step #8 separates four concepts that earlier ownership prose conflated:
 
-A second overlap is already in shipped code. TableFix owns tables and owns header-row semantics. DocStats `EPUB-004` remediates the same condition by setting `headerRowCount`, so two tools mutate one region under different verification standards. DocStats should report the condition and defer the change.
+- **Owner** is normative. Exactly one tool is responsible for each region in the census universe.
+- **Reporters** are non-exclusive. Zero or more tools may report a condition in a region without acquiring ownership or mutation authority.
+- **Detection Coverage** is empirical. It records what portion of the owned region the current implementation actually inspects.
+- **Remediation Authority** is permission. It records the maximum document-change authority granted to a tool for that region.
 
-`ownership/OWNERSHIP.md` becomes the single authority: a table of every document region, the tool that owns it, and what that tool does with it. Regions with no owner are listed explicitly as `UNOWNED` rather than being absent. Each tool README links to it instead of restating it, so the map cannot drift out of agreement with itself.
+The remediation-authority vocabulary is closed:
 
----
+- `NONE`
+- `MUTATE_ON_SELECTION`
+- `MUTATE_DOCUMENT_WIDE`
 
-## 6. Repository metadata standard
+`REPORT_ONLY` is not a remediation-authority value. Reporting is expressed by the Reporters field.
+
+Detection Coverage uses `FULL`, `PARTIAL`, or `NONE`, followed by qualification text when necessary. A frozen detection claim requires `SOURCE_VERIFIED` evidence at minimum. README or specification prose may identify a candidate boundary but cannot establish frozen detection coverage.
+
+Evidence state is recorded per ownership row rather than per tool:
+
+- `DOCUMENTED_ONLY`
+- `SOURCE_VERIFIED`
+- `RUNTIME_VERIFIED`
+
+A single tool may therefore have different evidence states across different regions.
+
+The Step #8 census universe is every document region or condition that a current suite tool detects, mutates, deliberately excludes, or claims as an ownership boundary, plus every region exposed by cross-tool exclusion or overlap analysis. Completeness is evaluated against that universe rather than against arbitrary untouched InDesign document state.
+
+### One owner, many reporters
+
+Every region in the census universe has exactly one owner. Reporting overlap is permitted. Mutation overlap is prohibited.
+
+Ownership follows the stable document region rather than the current detector. A detection gap does not create a new owner.
+
+This rule is binding for tables. TableFix owns paragraph formatting inside tables even where its current implementation does not yet inspect the full population.
+
+### Detection coverage is independent of ownership
+
+The Step #8 source census established that the previous table map overstated TableFix coverage.
+
+NormalFix excludes every paragraph inside a table before testing for `Normal`. TableFix iterates every table, but its current `auditTable()` returns before the paragraph-style audit when the top row does not qualify under the visual-header detector. Paragraph formatting in an ordinary non-visual-header table can therefore be owned by TableFix while remaining invisible to the current TableFix implementation.
+
+The repair is to decouple the paragraph audit from the visual-header gate. Paragraph auditing runs for every table. Header-specific findings and automatic header remediation remain governed by the header-confidence and complexity rules.
+
+### Authority `NONE` must reach the operator
+
+Every reported condition whose remediation authority is `NONE` must explicitly tell the operator that no automated suite remediation exists for that condition.
+
+An absent, disabled, or generic action button does not satisfy this rule.
+
+### Table header semantics
+
+TableFix owns table header-row semantics.
+
+DocStats may report missing table-header semantics through `EPUB-004`, but its remediation authority for that region is `NONE`. The current DocStats v1.1.0 branch source still writes `headerRowCount`; Step #8 removes that mutation path before ownership is frozen.
+
+### Source authority
+
+A source-verification claim records repository, commit SHA, and source path.
+
+The Step #8 opening census also identified `DS-CENSUS-001`: `DocStats/main` does not contain `DocStats.jsx`, while the inspected v1.1.0 source resides on `agent/docstats-v1.1.0` at commit `7eb2053665e0b736359325c41657e93041191f88`.
+
+`DS-CENSUS-001` does not block Step #8 documentation and census work. It blocks Step #9 production adoption until the authoritative DocStats implementation is established on `main`.
+
+---## 6. Repository metadata standard
 
 Applies to the five document-tool repositories and to the ScriptWatch repository where applicable.
 
@@ -314,8 +369,8 @@ This sequence is authoritative unless a new safety or correctness finding requir
 
    Direct-production LIVE canary: `PASS=7`, `FAIL=0`. Residual current-source CoreMutate canary: `PASS=5`, `FAIL=0`. Full actuals are frozen in §8.7.
 
-8. **Settle ownership boundaries.**
-   Make DocStats `EPUB-004` report-only, resolve the complex-table Normal+ gap, and freeze `ownership/OWNERSHIP.md` before other mutation adapters.
+8. **Freeze ownership, detection coverage, and remediation authority. — ACTIVE**
+   Complete the source-verified region and action census, remove DocStats `EPUB-004` mutation authority, decouple the TableFix paragraph audit from the visual-header gate, close operator-message gaps for `NONE` authority, and freeze `ownership/OWNERSHIP.md`. Acceptance criteria are defined in §9.
 
 9. **Adopt `core/mutate` in DocStats.**
    Start with `relinkAsset`, then the remaining actions DocStats still owns.
@@ -545,3 +600,163 @@ lastConformanceDate=2026-08-26
 The disposable test document was used for conformance work. The production manuscript was not modified.
 
 NormalFix Step #7 remains closed unless new evidence demonstrates a defect. The production adapter is the known-good reference implementation for subsequent suite mutation adapters.
+---
+
+## 9. Harmonization Step #8: Ownership, detection, and remediation authority
+
+Step #8 freezes the suite ownership contract before any mutation adapter beyond NormalFix is adopted.
+
+The governing rule is:
+
+**Ownership is normative. Detection coverage is empirical. Remediation authority is permission. Reporting is independent.**
+
+### AC08-01 — Complete region and action census
+
+Every current mutation surface and every owned, detected, deliberately excluded, or overlap-exposed region in the Step #8 census universe is represented in `ownership/OWNERSHIP.md`.
+
+Each row records:
+
+- Region
+- Owner
+- Reporters
+- Detection Coverage
+- Remediation Authority
+- Operator Disposition
+- Evidence State
+- Evidence Ref
+- Census Status
+
+Evidence state applies per row, not per tool.
+
+Every region has exactly one owner. No known region in the census universe may be absent from the map.
+
+### AC08-02 — Detection claims require source evidence
+
+Every frozen Detection Coverage claim is at least `SOURCE_VERIFIED` against a pinned repository commit and source path.
+
+README or specification evidence can support discovery but cannot establish frozen detection coverage.
+
+### AC08-03 — One owner, many reporters, exclusive mutation authority
+
+Every region has exactly one owner.
+
+Any number of tools may report a condition in that region.
+
+No region has more than one authorized mutator.
+
+DocStats `EPUB-004` may continue to report missing table-header semantics but receives remediation authority `NONE`. TableFix remains the sole potential mutator for table-header semantics where automatic remediation is authorized.
+
+### AC08-04 — TableFix owns all paragraph formatting inside tables
+
+TableFix owns paragraph formatting inside all tables regardless of visual-header appearance or current detector coverage.
+
+The opening source census records current detection honestly as incomplete where the visual-header gate prevents the paragraph audit from running.
+
+Production TableFix is changed so paragraph auditing runs independently for every table. Header-specific classification remains downstream of the visual-header detector.
+
+### AC08-05 — Standard, REVIEW, and complex table authority remain distinct
+
+Automatic TableFix remediation remains selection-bound.
+
+Eligible HIGH-confidence, non-complex table conditions may carry `MUTATE_ON_SELECTION`.
+
+REVIEW-confidence and complex-table conditions carry `NONE` where automatic remediation is unsafe.
+
+Ownership does not imply automatic remediation.
+
+### AC08-06 — Authority `NONE` reaches the operator
+
+Every reported condition whose remediation authority is `NONE` explicitly states that no automated remediation is available for that condition.
+
+The requirement is verified from source.
+
+An absent action, a disabled button, `Locate`, `None`, or a generic review instruction is insufficient unless the finding text explicitly communicates the no-remediation state.
+
+### AC08-07 — NormalFix boundary remains frozen
+
+NormalFix continues to own and remediate verified Normal+ paragraphs outside tables only.
+
+Its Step #7 adapter, conformance metadata, source SHA, and frozen evidence remain unchanged.
+
+Step #8 does not expand NormalFix into table content.
+
+### AC08-08 — HeaderFix authority is recorded by action surface
+
+HeaderFix census rows distinguish selected and document-wide action capability.
+
+The source-visible actions `Fix Selected Error`, `Fix All Errors`, `Clear Selected Override`, and `Clear All Overrides` are represented so document-wide mutation authority cannot disappear inside a generic tool-level declaration.
+
+### AC08-09 — DocStats source authority is resolved before Step #9
+
+`DS-CENSUS-001` records that `DocStats/main` lacks `DocStats.jsx` while the inspected v1.1.0 source resides on `agent/docstats-v1.1.0`.
+
+This discrepancy does not block Step #8.
+
+Step #9 cannot begin until the authoritative production DocStats source is established on `main` and pinned.
+
+### AC08-10 — Cross-tool ownership canary
+
+A disposable-document fixture proves at minimum:
+
+- verified Normal+ outside a table is detected and remediated only by NormalFix;
+- paragraph-formatting defects inside an ordinary non-visual-header table are detected by TableFix after gate decoupling;
+- paragraph-formatting defects inside a complex table are detected by TableFix but receive no automated remediation when authority is `NONE`;
+- eligible standard table-header semantics are owned and remediated only by TableFix;
+- DocStats reports the corresponding EPUB header condition without modifying the table;
+- HeaderFix section-marker remediation remains confined to its owned marker regions; and
+- every exercised `NONE` condition exposes the required operator message.
+
+The production manuscript is not used for mutation testing.
+
+### AC08-11 — Finding registry and ownership agreement
+
+`codes/CODES.csv`, production finding behavior, and `ownership/OWNERSHIP.md` agree on tool, region, severity, remediation availability, and ownership.
+
+No finding code may imply mutation authority that the ownership map denies.
+
+The registry is populated only after the source census has established the current finding surfaces.
+
+### AC08-12 — Freeze gate
+
+Step #8 closes only when:
+
+1. the census universe is complete;
+2. every region has exactly one owner;
+3. every frozen detection claim is `SOURCE_VERIFIED` or `RUNTIME_VERIFIED`;
+4. no mutation overlap remains;
+5. every accepted `NONE` condition reaches the operator explicitly;
+6. the TableFix paragraph-audit detection gap is closed;
+7. DocStats `EPUB-004` no longer mutates table-header state;
+8. the cross-tool disposable-document canary passes;
+9. `codes/CODES.csv` and the ownership map agree;
+10. frozen NormalFix Step #7 artifacts remain unchanged; and
+11. `ownership/OWNERSHIP.md` changes from active census state to `FROZEN`.
+
+Only after this gate passes does Step #9 open.
+
+### 9.1 Opening source-census actuals
+
+The Step #8 opening read-only census is pinned to:
+
+| Tool | Source ref | Source path | Opening evidence |
+|---|---|---|---|
+| NormalFix | `c57a25e94b0aa4a3691a8bff625c76bb2e0516aa` | `NormalFix.jsx` | Table exclusion and selected-only Normal+ remediation source-verified |
+| HeaderFix | `6a811800b77d3641a6c03e2f8b18d274d15cc260` | `HeaderFix.jsx` | Selected and document-wide marker remediation source-verified |
+| TableFix | `50613a468c0e034953b32007917c953329b4093c` | `TableFix.jsx` | Selected-only table remediation, complexity refusal, and visual-header-gated paragraph audit source-verified |
+| DocStats | `7eb2053665e0b736359325c41657e93041191f88` on `agent/docstats-v1.1.0` | `DocStats.jsx` | Five mutation surface classes and `EPUB-004` header mutation source-verified on branch |
+
+The opening census established four binding actuals.
+
+**NormalFix boundary.** NormalFix excludes table paragraphs before testing for `Normal` and rechecks the table boundary before remediation. Its owned mutation region remains verified Normal+ outside tables.
+
+**HeaderFix action scope.** HeaderFix exposes both selected and document-wide remediation paths. Maximum authorized scope must therefore be recorded per marker-condition region rather than inferred from a generic tool label.
+
+**TF-CENSUS-001 — Paragraph audit is gated by visual-header detection.** TableFix iterates every table, but `auditTable()` returns when `visualHeaderEvidence()` yields no candidate. `auditExpectedParagraphStyles()` therefore runs only after visual-header qualification. Ordinary tables without that visual signature currently receive no TableFix paragraph audit. This is a broader gap than the earlier complex-table-only description.
+
+**DocStats overlap and source-authority discrepancy.** The inspected DocStats v1.1.0 source confirms link update, relink, alternate-text entry, table header-row designation, and metadata entry. `EPUB-004` currently writes `headerRowCount`. The source is present on `agent/docstats-v1.1.0`, while `DocStats/main` currently contains no `DocStats.jsx`.
+
+The source-authority discrepancy is recorded as:
+
+`DS-CENSUS-001 — Production source authority unresolved`
+
+This is an artifact-versus-record disagreement. It blocks Step #9 code adoption, not Step #8 census and documentation work.
